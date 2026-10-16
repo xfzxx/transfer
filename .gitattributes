@@ -1,0 +1,7 @@
+# 换行符统一为 LF
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.exe    binary
+*.dll    binary
+*.ico    binary
