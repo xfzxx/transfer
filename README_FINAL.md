@@ -7,9 +7,16 @@
 
 ## 〇、先看这一条：exe 的版本
 
-项目目录里的 **`文件传输工具.exe` 已于 2026-09-19 重新打包**，包含到那一天为止的
-全部改进（含**多源传输**），**双击就能直接用**。
-（最后一次打包：2026-09-19 16:48，20.78 MB —— 源列表 / 覆盖提示这些改动都在里面。）
+成品仓里的 **`D:\AI\dist\transfer\文件传输工具.exe` 已于 2026-10-16 重新打包**，包含到那一天为止的
+全部改进（含**多源传输**、**拆模块**），**双击就能直接用**。
+（最后一次打包：2026-10-16 13:18，20,927,676 字节 / 19.96 MB，
+SHA256 `11F8A6E9394D222AFEC0682C856D35CAE789A0E19E34DB4BD02F04C502CB5B06`。）
+
+> **2026-10-16 这一版重打的是「拆模块」之后的代码。** 到这一天为止，
+> 原先单文件的 `file_transfer.py` 已拆成 **12 个模块**，打包时全部装进 exe：
+> 实测新包里比 9-21 那版**多出 7 个模块**（`transfer_core` / `app_bootstrapper` /
+> `sched_tab` / `transfer_form` / `maintenance_worker` / `ftp_transfer` / `ui_channel`）。
+> **界面和操作没有任何变化**，这一版纯粹是"把源码里已经改好的东西装进 exe"。
 
 > **这一版最大的变化：源可以选多个了。** 以前「源文件/文件夹」只能填一个，
 > 现在是一个**列表**，可以一次加好几个源，点一下「开始传输」就**一个接一个地传**。
@@ -20,8 +27,10 @@
 >
 > 窗口尺寸现在是 **880×690**，大小仍然不能手动拉。
 
-> **以后什么时候需要重新打包**：只要改动了 `file_transfer.py` / `config.py` /
-> `ui_dialogs.py` / `ftp_client.py` / `state_db.py` 里的任何一个，
+> **以后什么时候需要重新打包**：只要改动了项目里**任何一个 `.py`** ——
+> 现在共 **12 个模块**（`file_transfer` / `config` / `ui_dialogs` / `ftp_client` /
+> `state_db` / `ui_channel` / `transfer_core` / `ftp_transfer` / `sched_tab` /
+> `transfer_form` / `maintenance_worker` / `app_bootstrapper`）——
 > 就必须按「三、怎么打包成 exe」重打一次，否则你双击的还是旧版本。
 >
 > **判断方法**：看 exe 的"修改日期"。比 `.py` 文件旧，就说明该重打了。
@@ -32,6 +41,15 @@
 > **一点开就崩**。具体见「三、怎么打包成 exe」。
 
 更早的几个版本收在 `旧版备份\` 文件夹里，**平时不用管**：
+
+> ⚠️ **2026-10-16 更正**：这个文件夹**仍然存在**，只是被搬进了 D 盘的冷数据区：
+> **`D:\AI\archive\backups\transfer-旧版备份\`**（24 个文件 / 403 MB，最近一份 09-21）。
+> 10-09 整理 `D:\AI` 布局时随其它备份一起迁过去的，内容与下方表格一致，**不用改路径去别处找**。
+>
+> 本次重打包前的那一版（9-21 15:36，`20,883,795` 字节）**不在上面那批里**
+> （那批最新的是 09-21 07:23 的 `_P1前`，比它早），因此已单独存档到
+> `D:\AI\archive\backups\transfer-exe-20261016\文件传输工具_20260921_拆模块前.exe`
+> （该目录的 `README.txt` 写着回退方法与下次打包命令）。
 
 | 文件 | 构建日期 | 大小 | 说明 |
 |---|---|---|---|
@@ -192,8 +210,10 @@ python -m PyInstaller "文件传输工具.spec" --noconfirm --clean
 **注意这里没有 `--onefile` / `--windowed` / `--name`** —— 三个参数都已经写在
 `文件传输工具.spec` 里了，**再手敲一遍反而会互相打架**。
 
-打包完成后，exe 在 **`D:\AI\projects\transfer\dist\文件传输工具.exe`**。
-把这个 exe 复制到 `D:\AI\projects\transfer\`（覆盖旧的），就能双击用了。
+打包完成后，exe 先落在**项目内的临时目录**：
+**`D:\AI\projects\transfer\dist\文件传输工具.exe`**。
+把它**搬进成品仓** —— `D:\AI\dist\transfer\`（覆盖旧的），才能双击用。
+（成品仓是 `D:\AI` 顶层的 `dist\`，**只放能直接发出去的东西**，见 `D:\AI\README-布局.md` 规矩 2。）
 
 > **`文件传输工具.spec` 是项目正式文件，不是中间产物，千万别删！**
 > 它里面写着"要把 ttkbootstrap 的哪些东西装进 exe"。
@@ -212,7 +232,7 @@ python -m PyInstaller "文件传输工具.spec" --noconfirm --clean
 Remove-Item build, dist -Recurse -Force
 ```
 
-**只删这两个。** 删完记得把 `dist\` 里的 exe 先复制到项目根目录。
+**只删这两个。** 删之前记得把 `dist\` 里的 exe 先搬进成品仓 `D:\AI\dist\transfer\`。
 
 > **打包后的自检（30 秒）**：双击新 exe，确认界面是**白底、扁平**的现代样式，
 > 不是以前的灰色立体按钮。如果界面是旧的灰样式，说明装进去的是旧代码；
@@ -440,6 +460,7 @@ python -c "import sqlite3,os; p=os.path.join(os.path.expanduser('~'),'.ftp_trans
 | FTP 连接配置 | `~\.ftp_transfer_config.json` |
 | 传输状态库 | `~\.ftp_transfer_state.db` |
 | 失败清单 | 程序目录下的 `transfer_failed_日期时间.log` |
-| 可直接双击的 exe | `D:\AI\projects\transfer\文件传输工具.exe` |
-| 旧版本备份 | `D:\AI\projects\transfer\旧版备份\` |
-| 重新打包后 exe 的落点 | `D:\AI\projects\transfer\dist\文件传输工具.exe`（要自己复制到上面那格的位置） |
+| 可直接双击的 exe（**成品**） | `D:\AI\dist\transfer\文件传输工具.exe` |
+| 桌面快捷方式 | `C:\Users\32162\Desktop\文件传输工具.lnk`（指向上面那一格） |
+| 旧版本备份 | `D:\AI\archive\backups\transfer-旧版备份\`（见本文档开头「〇」节的更正） |
+| 重新打包时 exe 的**中转**落点 | `D:\AI\projects\transfer\dist\文件传输工具.exe`（**临时**，打完必须搬进上面第一格） |
