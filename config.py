@@ -2,7 +2,9 @@
 """全局常量与纯工具函数 —— 从 file_transfer.py 抽出的第一刀（见 PROJECT_STATE §7.4）。
 
 **本模块不含任何状态**：只有常量定义、无副作用的小函数，以及两个只在**调用时**
-才做文件 I/O 的配置读写函数（`load_last_config` / `save_config`）—— 导入本模块仍然零副作用。
+才做文件 I/O 的配置读写函数（`load_last_config` / `save_config`）—— 导入本模块仍然零副作用
+（唯一的例外是下面 `DATA_DIR` 那次 `os.makedirs`：它只**建目录**、不写文件，且失败静默放过，
+不改变任何程序行为，仅为后续读写准备落点）。
 `file_transfer.py` 通过 `import config` 使用它们，**不做 re-export**
 （`from config import X` 会让调用方拿到一份独立副本，改 config 里的值对副本无效 ——
 那正是测试侧注入守护专门要挡的"静默绿"）。
@@ -16,11 +18,69 @@ import errno
 import json
 import os
 import re
+import sys
 import time
 
 
+# ===================== 数据落点（DATA_DIR） =====================
+# 【改这个的原因】原先这 5 个文件写死在 os.path.expanduser("~")，也就是
+# C:\Users\32162\ —— 用户明确要求「配置/状态库要在它自己文件夹，不要放 C 盘」。
+#
+# 优先级（高 → 低）：
+#   1. 环境变量 FTP_TRANSFER_DATA_DIR —— 想临时换落点就设它，代码一行不用改；
+#   2. **程序运行位置**同级的 data\ 目录（**前提：可写**）：
+#        源码运行 → <项目根>\data\     （即 D:\AI\projects\transfer\data）
+#        打包 exe → <exe 所在目录>\data\（PyInstaller 下 sys.executable 才是真实位置，
+#                                        __file__ 会指到临时解压目录 _MEIPASS，不能用）
+#   3. %LOCALAPPDATA%\文件传输工具\data —— **兜底**。为什么必须有第 3 条：
+#        exe 是**单文件**（见 文件传输工具.spec：EXE(...) 吃下全部 binaries/datas），
+#        用户把它丢在 Program Files、桌面只读位置、甚至直接从下载目录双击打开都很常见，
+#        这些位置**写不进去**。没有兜底的话程序会在写配置那一刻崩，用户只会看到闪退。
+#
+# ⚠️ 副作用说明：这里**只建目录、并删掉自己刚建的探测文件**，不碰任何业务数据；
+#    所有异常一律静默放过，让后面的读写自己报错 ——
+#    不要因为选目录这一步就让整个程序在 import 阶段崩掉。
+def _writable(dirpath):
+    """dirpath 能不能真的落文件。能建目录 + 能写临时文件 才算通过。"""
+    try:
+        os.makedirs(dirpath, exist_ok=True)
+        probe = os.path.join(dirpath, ".write_probe.tmp")
+        with open(probe, "wb") as f:
+            f.write(b"1")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def _default_data_dir():
+    exe_dir = ""
+    if getattr(sys, "frozen", False):          # PyInstaller 打包后
+        exe_dir = os.path.dirname(sys.executable)
+    else:                                       # 源码运行：config.py 就在项目根下
+        exe_dir = os.path.dirname(os.path.abspath(__file__))
+
+    candidates = [os.path.join(exe_dir, "data")]
+
+    if getattr(sys, "frozen", False):          # 只有打包后才需要 LOCALAPPDATA 兜底
+        local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        candidates.append(os.path.join(local, "文件传输工具", "data"))
+
+    for c in candidates:
+        if _writable(c):
+            return c
+    return candidates[0]                        # 全写不了也别在这儿崩，交给后续读写报错
+
+
+DATA_DIR = os.environ.get("FTP_TRANSFER_DATA_DIR") or _default_data_dir()
+
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    pass
+
 # ===================== 配置持久化 =====================
-CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".ftp_transfer_config.json")
+CONFIG_FILE = os.path.join(DATA_DIR, ".ftp_transfer_config.json")
 
 MAX_LOG_LINES = 1000
 
@@ -48,7 +108,7 @@ _STATE_DB_ENABLED = True
 
 _ATOMIC_WRITE_ENABLED = True          # 【2a 仅声明，2b 生效】开关原子落盘 .part → os.replace
 
-STATE_DB_FILE    = os.path.join(os.path.expanduser("~"), ".ftp_transfer_state.db")
+STATE_DB_FILE    = os.path.join(DATA_DIR, ".ftp_transfer_state.db")
 
 # 【D-1-修改原因 1 → 2】`files` 的主键从 `(filename)` 改成 `(filename, src_root)`。
 # 为什么非改不可（实测，见 PROJECT_STATE §7.9）：单列主键意味着**全库每个裸文件名只允许一行**，
@@ -998,7 +1058,7 @@ def save_config(config):
 #   哪个键对应界面上哪个控件、怎么验类型，全在 file_transfer.py 的 `_restore_ux_state` ——
 #   理由是那份白名单回答的是"这份文件可以被谁相信"，而它要防的是**用户手改这个文件**，
 #   属界面层的判断，塞进常量模块只会让两边各存一份、迟早对不上。
-UX_STATE_FILE = os.path.join(os.path.expanduser("~"), ".ftp_transfer_ux.json")
+UX_STATE_FILE = os.path.join(DATA_DIR, ".ftp_transfer_ux.json")
 
 
 def load_ux_state():
@@ -1187,13 +1247,13 @@ def delete_profile(name):
 #   * 一个坏字段只让**那一条任务**不合法（丢掉它），不牵连其余任务；
 #   * 触发时间/星期/日期都要能**原样拼进 schtasks 的命令行**，所以这里用**正则**卡死，
 #     不是"大概是个字符串就收" —— 那是把命令行注入的口子留在用户可编辑的 JSON 上。
-SCHEDULE_FILE = os.path.join(os.path.expanduser("~"), ".ftp_transfer_schedules.json")
+SCHEDULE_FILE = os.path.join(DATA_DIR, ".ftp_transfer_schedules.json")
 
 # 无头模式的日志落点。**这是无头模式下唯一的日志终点** ——
 # 打包 `console=False` 会把 stdout 整个吞掉，界面又没人看。
 # 之所以是"一个目录 + 每天一个文件"而不是"一个文件滚到底"：
 # 定时任务跑一年就是一年，单文件会长到打不开；按天切还省了轮转逻辑。
-SCHEDULE_LOG_DIR = os.path.join(os.path.expanduser("~"), ".ftp_transfer_logs")
+SCHEDULE_LOG_DIR = os.path.join(DATA_DIR, ".ftp_transfer_logs")
 
 SCHEDULE_VERSION = 1
 
