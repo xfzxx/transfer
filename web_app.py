@@ -530,19 +530,24 @@ def run_c3(bridge, port=DEFAULT_PORT, title=None):
     `http://127.0.0.1:port/`，HTTP 面与 C4 **逐字节相同**；C3 与 C4 的差别**只在壳**
     （WebView2 窗口 vs 系统浏览器）。**只听 127.0.0.1**。
 
-    【为什么还要 `js_api.pump`】`ui_channel` 的 UI 泵必须在**主线程**按节奏调
-    `root.run_pending()`。而 pywebview 的 `webview.start(func)` 把 `func` 丢进
-    **子线程**（pywebview `__init__.py:294` `Thread(target=func)`），不能用来泵。
-    但 **JS→Python 调用（`js_api`）经 WebView2 的 `WebMessageReceived` 派发，
-    就在主线程**（`platforms/edgechromium.py:225 on_script_notify` → `js_bridge_call`）。
-    ⇒ 前端用一个 50ms `setInterval` 调 `window.pywebview.api.pump()` 当主线程节拍器。
-    这条链一旦断了，症状是"进度/日志不动"—— `hostPump` 里吞异常只是为了不让桥崩，
-    真正判它是否在跑仍靠端到端用例。
+    【泵为什么是"专用线程"而不是主线程】pywebview 的 `webview.start()` 必须占住
+    主线程（WinForms 消息循环），把 `run_pending()` 塞不进主线程。试过 `js_api`
+    当主线程节拍器 —— **实测不通**（`js_bridge_call` 不在主线程，`run_pending`
+    的主线程断言当场抛出，泵等于没跑，症状是所有 `/api/*` 都"主循环没在跑"超时）。
+    ⇒ 正解：起一个**专用泵线程**；并只在这一档把"UI 线程 = 主线程"这条 **Tk 专有**
+    的断言换掉（`web_host` 允许登记 `pump_thread`；`ui_channel` 的
+    `_DEBUG_UI_THREAD_ASSERT` 在这一档临时置 False）。替身层本就是**非 Tk 宿主**，
+    模型侧一律走锁；这条断言在 C4/tk 档**照旧开着**，安全网不拆。
 
     ⚠️ 没有 pywebview 的环境抛 ImportError（响亮失败，绝不静默退回 C4）。
     """
     import webview                                       # 没有就 ImportError
     from http.server import ThreadingHTTPServer
+
+    import ui_channel
+
+    old_assert = getattr(ui_channel, "_DEBUG_UI_THREAD_ASSERT", True)
+    ui_channel._DEBUG_UI_THREAD_ASSERT = False
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(bridge))
     threading.Thread(target=srv.serve_forever, daemon=True,
@@ -550,21 +555,26 @@ def run_c3(bridge, port=DEFAULT_PORT, title=None):
     url = "http://127.0.0.1:%d/" % port
     root = bridge.root
 
-    class _Api(object):
-        def pump(self):
-            # 主线程节拍：清空到期的 after 回调（进度 / 日志 / 队列泵）。
-            # 非主线程调用会撞 `SchedulerStub.run_pending` 的主线程断言 ——
-            # 捕获它，避免把 pywebview 的桥整个带崩（真出问题会在端到端用例里暴露）。
+    stop = threading.Event()
+
+    def _pump():
+        root.set_pump_thread()               # 本线程顶替"UI 线程"角色
+        while not (stop.is_set() or root._closed or root._destroyed):
             try:
-                return root.run_pending()
+                root.run_pending()
             except Exception:                            # noqa: BLE001
-                return None
+                pass
+            time.sleep(0.01)
+
+    threading.Thread(target=_pump, daemon=True, name="web-pump-c3").start()
 
     webview.create_window(title or root._title or "文件传输工具 v2.4",
-                          url=url, js_api=_Api())
+                          url=url)
     try:
         webview.start()
     finally:
+        stop.set()
+        ui_channel._DEBUG_UI_THREAD_ASSERT = old_assert
         srv.shutdown()
         srv.server_close()
     return 0

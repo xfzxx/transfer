@@ -388,7 +388,8 @@ class SchedulerStub(object):
       `seq` 做堆的第二关键字，`after(0, a)` 与 `after(0, b)` 严格按 a、b 顺序。
     """
 
-    __slots__ = ("_heap", "_seq", "_cancelled", "_lock", "_closed", "_on_error")
+    __slots__ = ("_heap", "_seq", "_cancelled", "_lock", "_closed", "_on_error",
+                 "_pump_thread")
 
     def __init__(self):
         self._heap = []            # (due_seconds, seq, tid, fn, args)
@@ -396,6 +397,9 @@ class SchedulerStub(object):
         self._cancelled = set()
         self._lock = threading.Lock()
         self._closed = False
+        # 【C3 用】pywebview 的 GUI 循环占住主线程，没法在主线程跑泵 ⇒ 允许登记一个
+        # "泵线程"顶替主线程的角色。只在 C3 运行时设；C4/tk 保持 None（判据不变）。
+        self._pump_thread = None
         # 【与 Tk 对齐】回调里抛的异常，Tk 会交给 `root.report_callback_exception`
         # 而不是让整个消息泵崩掉。缺省 None ⇒ **照旧向上抛**（保持既有行为不变，
         # 免得这一步顺手改掉别的用法的语义）；装配层/宿主把它设上就得到 Tk 的行为。
@@ -404,6 +408,10 @@ class SchedulerStub(object):
     def set_error_hook(self, fn):
         """设回调异常钩子 `fn(exc_type, exc, tb)`。传 None 复原为"向上抛"。"""
         self._on_error = fn
+
+    def set_pump_thread(self, thread=None):
+        """登记"泵线程"（缺省 = 当前线程）。它获得与主线程相同的 `run_pending` 权限。"""
+        self._pump_thread = threading.current_thread() if thread is None else thread
 
     # ---- 机械枚举面：after / after_cancel ----
     def after(self, ms, fn, *args):
@@ -436,7 +444,8 @@ class SchedulerStub(object):
              饿死（与 `ui_channel._drain_ui_queue` 的批上限同一动机）。
         `now` 只为探针注入假时钟用；正常调用不传。
         """
-        if threading.current_thread() is not threading.main_thread():
+        cur = threading.current_thread()
+        if cur is not threading.main_thread() and cur is not self._pump_thread:
             raise AssertionError("SchedulerStub.run_pending 必须在主线程调用"
                                  "（ui_channel 的线程断言依赖这一条）")
         if now is None:
@@ -559,6 +568,10 @@ class WebRoot(object):
 
     def run_pending(self, max_callbacks=None):
         return self._sched.run_pending(max_callbacks=max_callbacks)
+
+    def set_pump_thread(self, thread=None):
+        """登记执行 `run_pending` 的线程（C3 用；C4/tk 不需要）。"""
+        return self._sched.set_pump_thread(thread)
 
     def next_due_in(self):
         return self._sched.next_due_in()
