@@ -98,7 +98,15 @@
   <!-- ================= 设置 ================= -->
   <section class="pane" id="pane-settings">
     <div class="card">
-      <div class="card-head"><span>FTP 配置</span></div>
+      <div class="card-head">
+        <span>FTP 配置</span>
+        <div class="head-actions">
+          <button class="btn btn-primary" id="prof-new">新建…</button>
+          <button class="btn btn-outline" id="prof-edit">编辑…</button>
+          <button class="btn btn-outline" id="prof-del">删除</button>
+          <button class="btn btn-outline" id="prof-active">设为当前</button>
+        </div>
+      </div>
       <ul class="list" id="profile-list"></ul>
       <p class="hint" id="profile-summary"></p>
     </div>
@@ -163,6 +171,44 @@
     <p class="hint" id="picker-err"></p>
     <div class="modal-foot">
       <button class="btn btn-primary" id="picker-pick">选择此文件夹</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="profile-form" hidden>
+  <div class="modal-box modal-box-sm">
+    <div class="modal-head">
+      <span id="pf-title">新建 FTP 配置</span>
+      <button class="btn btn-outline" id="pf-close">关闭</button>
+    </div>
+    <div class="row">
+      <span class="lbl">名称</span>
+      <input class="input grow" id="pf-name" type="text" spellcheck="false">
+    </div>
+    <div class="row">
+      <span class="lbl">服务器地址</span>
+      <input class="input grow" id="pf-host" type="text" spellcheck="false">
+    </div>
+    <div class="row">
+      <span class="lbl">端口</span>
+      <input class="input input-num" id="pf-port" type="number" min="1" max="65535">
+    </div>
+    <div class="row">
+      <span class="lbl">用户名</span>
+      <input class="input grow" id="pf-user" type="text" spellcheck="false">
+    </div>
+    <div class="row">
+      <span class="lbl">密码</span>
+      <input class="input grow" id="pf-pass" type="password" spellcheck="false">
+    </div>
+    <div class="row">
+      <span class="lbl">远程目录</span>
+      <input class="input grow" id="pf-dir" type="text" spellcheck="false" placeholder="如 /pub/data">
+    </div>
+    <p class="hint" id="pf-hint"></p>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="pf-save">保存</button>
+      <button class="btn btn-outline" id="pf-cancel">取消</button>
     </div>
   </div>
 </div>

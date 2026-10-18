@@ -223,6 +223,29 @@ class WebBridge(object):
         except Exception:
             return None
 
+    def _profile_rows(self):
+        r"""FTP 配置的**字段级**快照（前端「编辑…」拿它当表单初值）。
+
+        【为什么不能像别处那样"把对象丢给 `_jsonable` 了事"】`_jsonable` 对不认识的类型
+        兜底是 `str(v)` —— 那是给"意外混进来的东西"准备的最后一道。一套配置是个 dict，
+        丢进去会变成 `"{'name': 'x', 'host': ...}"` 这样一段 **Python repr 字符串**：
+        前端既填不了表单，那段字符串里还**带着口令**。所以这里显式逐字段取。
+
+        【为什么把口令也发过去】Tk 档的编辑对话框就是这么干的（`FTPSettingsDialog` 用
+        `initial_config` 预填口令输入框，`show="*"` 遮住）—— 不这么做，用户每次改地址
+        都得**重打一遍口令**。两档的差别只在于：Tk 那份一直住在进程内存里，Web 这份要
+        过一次 `127.0.0.1` 的本地 HTTP、并落在 DOM 的 `<input type="password">` 里。
+        **相同的口径照旧**：列表与摘要里一个字符都不显示（见 `_show_profile_summary`）。
+        """
+        rows = []
+        for p in getattr(self.app, "ftp_profiles", []) or []:
+            if not isinstance(p, dict):
+                continue
+            rows.append({k: self._jsonable(p.get(k))
+                         for k in ("name", "host", "port", "user",
+                                   "password", "remote_dir")})
+        return rows
+
     def _widget_model(self, w):
         m = {"kind": w._kind, "state": w._state}
         opts = {}
@@ -253,7 +276,7 @@ class WebBridge(object):
             "vars": {k: self._var_value(v) for k, v in self.vars.items()},
             "widgets": {k: self._widget_model(w) for k, w in self.widgets.items()},
             "source_list": self._jsonable(getattr(self.app, "source_list", [])),
-            "ftp_profiles": self._jsonable(getattr(self.app, "ftp_profiles", [])),
+            "ftp_profiles": self._profile_rows(),
             "ftp_active": self._jsonable(getattr(self.app, "ftp_active", "")),
             "messages": msgs,
         }
@@ -291,6 +314,22 @@ class WebBridge(object):
             return app._sched._sched_refresh_status()
         if action == "sched_reload":
             return app._sched._sched_reload(select=None)
+        # ---- FTP 配置（Tab2「FTP 配置」那一组按钮的 Web 侧落点）----
+        # 【为什么"删 / 设为当前"能整段复用，"新建 / 编辑"不能】前两个只依赖"列表里
+        #   选中的那一套"：`_profile_delete` / `_profile_set_active` 自己去读
+        #   `profile_listbox` 的选中项，而那个选中项**也是**前端 `select_list` 在同一个
+        #   替身控件上设进去的 ⇒ 同一份状态、同一份实现；连删除前的二次确认
+        #   （`askyesno`）都自动走前端模态框（见 `_dialog` 的应答类分支）。
+        #   后两个的中段是 `ui_dialogs.FTPSettingsDialog`（`tk.Toplevel`）—— Web 档没有
+        #   窗口可画 ⇒ 只能把"表单里的那几个字段"直接送进 `_profile_save_fields`；
+        #   而"存 + 刷新列表 + 回填 Tab1 + 记日志"那半截仍与 Tk 档**共用同一份**。
+        if action in ("profile_new", "profile_edit"):
+            return app._form._profile_save_fields(payload,
+                                                  is_new=(action == "profile_new"))
+        if action == "profile_delete":
+            return app._form._profile_delete()
+        if action == "profile_set_active":
+            return app._form._profile_set_active()
         raise ValueError("未知语义动作：%r" % (action,))
 
     def _invoke(self, req):
@@ -321,7 +360,13 @@ class WebBridge(object):
                 fn(web_kit._Event(widget=obj))
             return idx
         if action == "semantic":
-            return self._semantic(payload.get("name"), payload)
+            # ⚠️ 语义动作名必须从**信封**（req）里读，不能从 payload 里读：
+            #    payload 里也可能有一个 `name` —— 那正是 FTP 配置的名字
+            #    （`{"action":"semantic","name":"profile_new","payload":{"name":"生产",…}}`）。
+            #    从 payload 里读的后果实测过：`_semantic("生产", …)` ⇒
+            #    "未知语义动作：'生产'"。前端报这一句时，谁也想不到问题出在
+            #    "信封的字段和载荷的字段撞了名"。
+            return self._semantic(req.get("name"), req.get("payload") or req)
         raise ValueError("未知动作：%r" % (action,))
 
     def invoke(self, req):

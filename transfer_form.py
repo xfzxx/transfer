@@ -865,9 +865,7 @@ class TransferForm(object):
         self.root.wait_window(dlg)
         if not dlg.result:
             return
-        self.ftp_profiles, self.ftp_active = config.load_profiles()
-        self._refresh_profile_list()
-        self._ui._threadsafe_log("[配置] 已新建 FTP 配置「%s」" % name)
+        self._profile_after_save(name, "已新建")
     def _profile_edit(self):
         """编辑**选中的**那一套（不是当前那套）。
 
@@ -886,13 +884,84 @@ class TransferForm(object):
         self.root.wait_window(dlg)
         if not dlg.result:
             return
+        self._profile_after_save(p["name"], "已更新", select=idx,
+                                 was_active=(p["name"] == self.ftp_active))
+    def _profile_after_save(self, name, verb, select=None, was_active=False):
+        """一套配置保存成功之后的**同一截尾**：重读盘 → 重画列表 →（必要时）回填 Tab1 → 记日志。
+
+        【为什么必须"重读盘"，而不是就地改内存那一条】**盘才是事实**：
+        `config.save_profile` 里那道 `_clean_profile` 会洗掉不合法的字段（端口越界回落 21、
+        `remote_dir` 开头补 `/`）。内存若只做局部更新，界面上就会显示一套**磁盘上并不存在**
+        的配置 —— 下次 ⚙ 打开时拿到的还是旧值，用户只会觉得"我改了但没生效"。
+
+        【为什么抽成一个方法】三个调用方（`_profile_new` / `_profile_edit` /
+        `_profile_save_fields`）的后半截**逐字相同**。写成三份的唯一后果是将来改一处忘两处，
+        而那种病的症状是"Tk 档与 Web 档对同一次编辑给出不同结果"——
+        没有任何一条测试会红，只能靠人看出来。
+
+        `verb` 是日志里那个动词（"已新建" / "已更新"），由调用方给：它区分的是**用户干了什么**，
+        不是本方法干了什么。`was_active` 同理 —— "改的是不是当前那一套"要在**保存之前**判定。
+        """
         self.ftp_profiles, self.ftp_active = config.load_profiles()
-        self._refresh_profile_list(select=idx)
-        # 改的若是**当前**这套，Tab1 里的那份内存配置与路径显示都得跟着走，
-        # 否则用户回到传输页看到的是旧地址，点开始却用新地址。
-        if p["name"] == self.ftp_active:
+        self._refresh_profile_list(select=select)
+        if was_active:
+            # 改的若是**当前**这套，Tab1 里的那份内存配置与路径显示都得跟着走，
+            # 否则用户回到传输页看到的是旧地址，点开始却用新地址。
             self._apply_active_profile()
-        self._ui._threadsafe_log("[配置] 已更新 FTP 配置「%s」" % p["name"])
+        self._ui._threadsafe_log("[配置] %s FTP 配置「%s」" % (verb, name))
+    def _profile_save_fields(self, fields, is_new):
+        r"""把**一份表单字段**写成一套配置（**不经过 Tk 对话框**）。Web 前端的「新建/编辑…」走这里。
+
+        【为什么需要它 —— `_profile_new` / `_profile_edit` 那两条路在 Web 档走不通】
+        它们的中段是 `ui_dialogs.FTPSettingsDialog`（一个 `tk.Toplevel`）：Web 档下没有窗口
+        可画（`web_kit` 只给替身，`wait_window` 立刻返回、`result` 恒为 None）。所以**"取值"
+        那一步两档只能各走各的**；而"存 + 刷新"那一步必须是同一份（`_profile_after_save`），
+        否则同一次编辑在两档会得到不同结果。
+
+        `fields` = 前端表单里那六个键（`name` / `host` / `port` / `user` / `password` /
+        `remote_dir`）。失败**抛 `ValueError`**（Tk 档由对话框自己 `showwarning`，它到不了这里）：
+        Web 档由 `web_app._semantic` 翻成 `{ok:false, error}` → 前端把这句话显示在表单里、
+        **不关框**，用户改一个字符再点保存即可。
+
+        【为什么把校验收在这里，而不是交给 `config.save_profile`】`_clean_profile` 遇到
+        非数字/越界的端口是**静默回落 21**。那正好是最坏的那种失败：用户以为改成了 21xx，
+        实际连的是 21。所以那两句提示必须挡在写盘之前 —— 判据与文案与
+        `ui_dialogs.FTPSettingsDialog._get_config` **逐字相同**（那是 Tk 档的同一道关）。
+        """
+        name = (fields.get("name") or "").strip()
+        if not name:
+            raise ValueError("名字不能为空。")
+        if is_new and any(p["name"] == name for p in self.ftp_profiles):
+            # 与 `_profile_new` 同一条挡法：点"新建"却把老的那套改了，是**静默改错地方**。
+            raise ValueError("已经有一套叫「%s」的配置了，换个名字。" % name)
+        if not is_new and not any(p["name"] == name for p in self.ftp_profiles):
+            # 要编辑的这套在盘上已经不在了（另一处删了 / 文件被手改过）。说清楚，
+            # 而不是让它悄悄"就地新建"出一套同名的来。
+            raise ValueError("配置「%s」已经不在了，刷新列表后再试。" % name)
+        host = (fields.get("host") or "").strip()
+        if not host:
+            raise ValueError("服务器地址不能为空")
+        try:
+            port = int(str(fields.get("port")).strip())
+        except (TypeError, ValueError):
+            raise ValueError("端口必须是数字")
+        remote_dir = (fields.get("remote_dir") or "").strip()
+        if not remote_dir.startswith("/"):
+            remote_dir = "/" + remote_dir
+        cfg = {"host": host, "port": port,
+               "user": (fields.get("user") or "").strip(),
+               "password": (fields.get("password") or "").strip(),
+               "remote_dir": remote_dir}
+        idx = None
+        for i, p in enumerate(self.ftp_profiles):
+            if p["name"] == name:
+                idx = i
+                break
+        # "改的是不是当前那一套"必须在保存前判定（保存之后 `ftp_active` 可能已经变了）。
+        was_active = (name == self.ftp_active)
+        config.save_profile(name, cfg)      # 新建 = 追加；编辑 = 就地更新同名那套（不改名字）
+        self._profile_after_save(name, "已新建" if is_new else "已更新",
+                                 select=idx, was_active=was_active)
     def _profile_delete(self):
         idx = self._selected_profile_idx()
         if idx is None:
