@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件传输工具</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <h1 id="app-title">文件传输工具</h1>
+  <div class="topbar-right">
+    <span id="mode-badge" class="badge">…</span>
+    <span id="conn-badge" class="badge badge-dim">连接中</span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab is-active" data-tab="transfer">传输</button>
+  <button class="tab" data-tab="settings">设置</button>
+  <button class="tab" data-tab="schedule">定时任务</button>
+</nav>
+
+<main>
+  <!-- ================= 传输 ================= -->
+  <section class="pane is-active" id="pane-transfer">
+    <div class="card">
+      <div class="card-head">
+        <span>源文件夹（可多个）</span>
+        <div class="head-actions">
+          <button class="btn btn-outline" id="src-browse">浏览…</button>
+          <button class="btn btn-outline" data-semantic="remove_source">－ 移除</button>
+        </div>
+      </div>
+      <ul class="list" id="source-list"></ul>
+      <p class="hint" id="source-hint"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><span>目标文件夹</span></div>
+      <div class="row">
+        <input class="input grow" data-var="dest_path" type="text" spellcheck="false">
+        <select class="input" data-var="dest_type">
+          <option value="local">本地</option>
+          <option value="ftp">FTP</option>
+        </select>
+        <button class="btn btn-outline" id="dst-browse">浏览…</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><span>选项</span></div>
+      <div class="row">
+        <span class="lbl">传输模式</span>
+        <label class="radio"><input type="radio" name="transfer_mode" value="copy" data-var="transfer_mode"> 复制</label>
+        <label class="radio"><input type="radio" name="transfer_mode" value="move" data-var="transfer_mode"> 移动</label>
+      </div>
+      <div class="row">
+        <span class="lbl">文件类型过滤</span>
+        <input class="input grow" data-var="file_filter" type="text" placeholder="如 .txt,.jpg" spellcheck="false">
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" data-var="flatten"> 扁平化传输（不保留目录结构）</label>
+        <span class="lbl lbl-inline">并发线程数</span>
+        <input class="input input-num" data-var="thread_count" type="number" min="1" max="16">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><span>进度</span></div>
+      <div class="progress"><div class="progress-fill" id="prog-fill"></div></div>
+      <div class="row row-between">
+        <span class="muted" id="prog-text">0 / 0</span>
+        <span class="muted" id="speed-text"></span>
+      </div>
+      <div class="row btns">
+        <button class="btn btn-primary" data-click="start_btn">开始传输</button>
+        <button class="btn btn-outline" data-click="stop_btn">停止</button>
+        <button class="btn btn-outline" data-click="pause_btn">暂停</button>
+        <button class="btn btn-outline" data-click="retry_btn">重传失败</button>
+        <button class="btn btn-outline" id="reset-sync">重置同步点</button>
+      </div>
+      <p class="hint" id="sync-text"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span>日志</span>
+        <div class="head-actions">
+          <button class="btn btn-outline" data-click="export_log_btn">导出日志</button>
+          <button class="btn btn-outline" id="log-clear">清屏</button>
+        </div>
+      </div>
+      <pre class="log" id="log-text"></pre>
+    </div>
+  </section>
+
+  <!-- ================= 设置 ================= -->
+  <section class="pane" id="pane-settings">
+    <div class="card">
+      <div class="card-head"><span>FTP 配置</span></div>
+      <ul class="list" id="profile-list"></ul>
+      <p class="hint" id="profile-summary"></p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span>日志</span></div>
+      <div class="row">
+        <span class="lbl">日志级别</span>
+        <label class="radio"><input type="radio" name="log_level" value="verbose" data-var="log_level"> 详细</label>
+        <label class="radio"><input type="radio" name="log_level" value="normal" data-var="log_level"> 普通</label>
+      </div>
+      <div class="row">
+        <span class="lbl">日志备份目录</span>
+        <input class="input grow" data-var="log_export_dir" type="text" spellcheck="false">
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><span>状态库维护</span></div>
+      <div class="row">
+        <span class="lbl">保留天数</span>
+        <input class="input input-num" data-var="db_keep_days" type="number" min="1">
+        <label class="check"><input type="checkbox" data-var="purge_overwrites"> 同时清空覆盖记录</label>
+        <button class="btn btn-danger" data-click="purge_btn">清空状态库…</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 定时任务 ================= -->
+  <section class="pane" id="pane-schedule">
+    <div class="card">
+      <div class="card-head">
+        <span>计划任务</span>
+        <div class="head-actions">
+          <button class="btn btn-outline" data-semantic="refresh_sched">刷新</button>
+          <button class="btn btn-outline" data-click="sched_toggle_btn">启/停</button>
+          <button class="btn btn-outline" data-click="sched_banner_btn">全部重新注册</button>
+        </div>
+      </div>
+      <p class="hint" id="sched-banner"></p>
+      <ul class="list" id="sched-list"></ul>
+      <p class="hint" id="sched-detail"></p>
+      <pre class="log log-sm" id="sched-cmd"></pre>
+      <p class="hint" id="sched-hint"></p>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="picker" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="picker-title">选择文件夹</span>
+      <button class="btn btn-outline" id="picker-close">关闭</button>
+    </div>
+    <div class="row">
+      <button class="btn btn-outline" id="picker-up">↑ 上级</button>
+      <input class="input grow" id="picker-path" type="text" spellcheck="false">
+      <button class="btn btn-outline" id="picker-go">转到</button>
+    </div>
+    <div class="row">
+      <select class="input" id="picker-drives"></select>
+    </div>
+    <ul class="list list-scroll" id="picker-dirs"></ul>
+    <p class="hint" id="picker-err"></p>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="picker-pick">选择此文件夹</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="dialog" hidden>
+  <div class="modal-box modal-box-sm">
+    <div class="modal-head">
+      <span id="dialog-title">提示</span>
+      <span class="badge" id="dialog-kind"></span>
+    </div>
+    <p class="dialog-msg" id="dialog-msg"></p>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="dialog-yes">确定</button>
+      <button class="btn btn-outline" id="dialog-no">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

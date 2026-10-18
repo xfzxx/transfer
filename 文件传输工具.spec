@@ -50,12 +50,28 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 _tb_datas = collect_data_files('ttkbootstrap')
 _tb_hidden = collect_submodules('ttkbootstrap')
 
+# ============================ 功能C3/C4：Web 前端资源 ============================
+# 【为什么必须写在这里】Web 档（C3=pywebview / C4=stdlib HTTP）把界面渲染成了
+#   `web\index.html` + `web\app.css` + `web\app.js` 这套**纯静态文件**，由 `web_app.py`
+#   在运行时按 `WEB_DIR` 从盘上读。PyInstaller 的静态分析**只认 import**，
+#   这三份文件没有任何 `import` 指着它们 ⇒ 不打进去的话，开发态一切正常，
+#   **打包后的 exe 一开 web 档就白屏**（找不到 index.html）——正是那一类
+#   "开发态看不见、打包才炸"的 bug。
+#   ⇒ 用 `datas` 把整个 `web\` 目录原样带上，运行时落点在 `sys._MEIPASS\web\`，
+#     与 `web_app.WEB_DIR` 的探测逻辑对齐。
+import os
+# `SPECPATH` 由 PyInstaller 注入 = 本 spec 所在目录（可靠）；老版本没有时退回 cwd。
+_here = globals().get("SPECPATH") or os.path.abspath(os.getcwd())
+_web_datas = [(os.path.join(_here, 'web'), 'web')]
+# 单文件 exe 红线：这些都进 `a.datas`，仍由 bootloader 解包到临时目录 ⇒ 不破坏单文件。
+# ============================ 功能C3/C4：Web 前端资源 ============================
+
 a = Analysis(
     ['file_transfer.py'],
     pathex=[],
     binaries=[],
-    datas=_tb_datas,
-    hiddenimports=_tb_hidden + ['PIL._tkinter_finder'],
+    datas=_tb_datas + _web_datas,
+    hiddenimports=_tb_hidden + ['PIL._tkinter_finder'] + ['web_kit', 'web_app', 'web_host'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -75,7 +91,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # 【打包红线，2026-10-14 裁定】`upx=True` 必须改成 `False`：
+    #   UPX 压缩过的 exe **极易触发杀软启发式**（本项目实测环境有奇安信在跑）。
+    #   省下的那点体积，远不值"成品被拦、用户装不上"的代价。
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

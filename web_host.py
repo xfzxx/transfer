@@ -79,10 +79,11 @@ r"""Web 双模宿主的**替身层**（步 1：只做三个 Stub，不含前端�
 """
 import heapq
 import itertools
+import sys
 import threading
 import time
 
-__all__ = ["VarStub", "WidgetStub", "SchedulerStub"]
+__all__ = ["VarStub", "WidgetStub", "SchedulerStub", "WebRoot"]
 
 
 # =============================================================================
@@ -387,7 +388,7 @@ class SchedulerStub(object):
       `seq` 做堆的第二关键字，`after(0, a)` 与 `after(0, b)` 严格按 a、b 顺序。
     """
 
-    __slots__ = ("_heap", "_seq", "_cancelled", "_lock", "_closed")
+    __slots__ = ("_heap", "_seq", "_cancelled", "_lock", "_closed", "_on_error")
 
     def __init__(self):
         self._heap = []            # (due_seconds, seq, tid, fn, args)
@@ -395,6 +396,14 @@ class SchedulerStub(object):
         self._cancelled = set()
         self._lock = threading.Lock()
         self._closed = False
+        # 【与 Tk 对齐】回调里抛的异常，Tk 会交给 `root.report_callback_exception`
+        # 而不是让整个消息泵崩掉。缺省 None ⇒ **照旧向上抛**（保持既有行为不变，
+        # 免得这一步顺手改掉别的用法的语义）；装配层/宿主把它设上就得到 Tk 的行为。
+        self._on_error = None
+
+    def set_error_hook(self, fn):
+        """设回调异常钩子 `fn(exc_type, exc, tb)`。传 None 复原为"向上抛"。"""
+        self._on_error = fn
 
     # ---- 机械枚举面：after / after_cancel ----
     def after(self, ms, fn, *args):
@@ -441,7 +450,13 @@ class SchedulerStub(object):
                 if not self._heap or self._heap[0][0] > now:
                     break
                 _, _, tid, fn, args = heapq.heappop(self._heap)
-            fn(*args)
+            try:
+                fn(*args)
+            except Exception:                      # noqa: BLE001
+                # Tk 语义：单个回调炸了不带走整个消息泵。没装钩子就照旧向上抛。
+                if self._on_error is None:
+                    raise
+                self._on_error(*sys.exc_info())
             ran += 1
         return ran
 
@@ -466,3 +481,192 @@ class SchedulerStub(object):
             self._closed = True
             self._heap = []
             self._cancelled = set()
+
+
+# =============================================================================
+# ④ WebRoot —— 替代 `tk.Tk()`（窗口 + `after` 调度 + 协议钩子）
+# =============================================================================
+class _TclInterpStub(object):
+    r"""`root.tk` 的替身 —— Tcl 解释器的一个"长得像"的空壳。
+
+    【为什么必须有一个、而且必须是**同一个对象**】
+      `app_bootstrapper._ensure_ui_theme()` 用 `cur._c_bound_tkapp is tk_root.tk`
+      判断"这套主题绑的是不是本解释器"。`root.tk` 每次返回**同一个**对象，
+      这个身份判据才成立（否则每次都被判成"换了新解释器"，主题被反复重建）。
+    它不实现任何真实 Tcl 能力 —— `call(...)` 一律回空串（`_sched_tab_inner`
+    那类探针直读 `after info` 的场景只发生在测试里，且那些脚本走 tk 档）。
+    """
+
+    def call(self, *a, **k):
+        return ""
+
+    def __getattr__(self, name):
+        def _f(*a, **k):
+            return ""
+        return _f
+
+
+class WebRoot(object):
+    r"""Web 宿主的 root 替身：`tk.Tk()` 的位置上放它，装配代码一行都不用改。
+
+    【它替掉的是哪几件事】（由 `app_bootstrapper` / `file_transfer` / `ui_channel`
+    的实际用法机械枚举得出 —— 与 `WidgetStub` 的做法同源）：
+      · `after` / `after_cancel`  → 转给 `SchedulerStub`（**唯一的真能力**）；
+      · `title` / `geometry` / `resizable` → 记下来（前端标题 / 窗口尺寸的真相）；
+      · `protocol("WM_DELETE_WINDOW", fn)` → 记下来（关窗 = 前端发一条 close 动作）；
+      · `tk` → `_TclInterpStub`（见上）；
+      · `destroy` / `quit` / `mainloop` / `update` → 宿主循环的收尾与泵。
+
+    【它是"宿主"，不是"控件"】所以**不继承 `Widget`**：它不出现在界面模型里，
+    也不被 `Widget.__getattr__` 兜底。未知属性照旧 `AttributeError`（响亮失败）——
+    哪一天装配代码多调了一个 root 方法，这里会当场炸，而不是静默吞掉。
+
+    【`run_pending` 是给宿主主循环的】C3（pywebview 事件循环）与 C4（HTTP 等待
+    循环）都在**主线程**按自己的节奏调它。回调里再 `after(...)` 也成立（队列语义）。
+    """
+
+    def __init__(self, scheduler=None):
+        self._sched = scheduler if scheduler is not None else SchedulerStub()
+        self._tk = _TclInterpStub()
+        self._title = ""
+        self._geometry = ""
+        self._protocols = {}
+        self._destroyed = False
+        self._closed = False
+        self._withdrawn = False
+        # 运行时（`web_app`）装配期回填：控件名 → 控件 / 变量名 → 变量。
+        self.bridge = None
+        # 与 Tk 同名同义：回调里抛的异常交给它（`install_error_capture` 会覆盖它）。
+        self.report_callback_exception = self._default_callback_exception
+        self._sched.set_error_hook(self._on_callback_error)
+
+    def _default_callback_exception(self, exc_type, exc, tb):
+        """没被覆盖时：像 Tk 那样打印到 stderr 并继续（不带走消息泵）。"""
+        import traceback
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+
+    def _on_callback_error(self, exc_type, exc, tb):
+        self.report_callback_exception(exc_type, exc, tb)
+
+    # ---- 调度（唯一真能力） ----
+    def after(self, ms, fn=None, *args):
+        if fn is None:
+            return None                      # Tk 的 `after(ms)`（无回调）在本项目未用
+        return self._sched.after(ms, fn, *args)
+
+    def after_cancel(self, tid):
+        return self._sched.after_cancel(tid)
+
+    def run_pending(self, max_callbacks=None):
+        return self._sched.run_pending(max_callbacks=max_callbacks)
+
+    def next_due_in(self):
+        return self._sched.next_due_in()
+
+    def pending_count(self):
+        return self._sched.pending_count()
+
+    # ---- Tcl 解释器 ----
+    @property
+    def tk(self):
+        return self._tk
+
+    # ---- 窗口面 ----
+    def title(self, text=None):
+        if text is not None:
+            self._title = text
+        return self._title
+
+    def geometry(self, spec=None):
+        if spec is not None:
+            self._geometry = spec
+        return self._geometry
+
+    def resizable(self, *a):
+        return None
+
+    minsize = resizable
+    maxsize = resizable
+
+    def protocol(self, name, fn=None):
+        if fn is not None:
+            self._protocols[name] = fn
+        return fn
+
+    def withdraw(self):
+        self._withdrawn = True
+        return None
+
+    def deiconify(self):
+        self._withdrawn = False
+        return None
+
+    def iconify(self):
+        return None
+
+    def attributes(self, *a, **k):
+        return None
+
+    def update(self):
+        return self._sched.run_pending()
+
+    def update_idletasks(self):
+        return None
+
+    def destroy(self):
+        self._destroyed = True
+        return None
+
+    def quit(self):
+        self._closed = True
+        return None
+
+    def mainloop(self, n=0):
+        r"""阻塞式主循环（**给"没有宿主循环"的脚本用**，例如体检脚本）。
+
+        真实双模各有自己的主循环（C3 = pywebview；C4 = HTTP 等待循环），
+        它们按自己的节奏调 `run_pending()`，**不会**走这里。这里只是把
+        "跑到 `quit()`/`destroy()` 为止"这件事做完整 —— 免得脚本自己写一个
+        不泵队列的空转循环。
+        """
+        while not (self._closed or self._destroyed):
+            self._sched.run_pending()
+            d = self._sched.next_due_in()
+            time.sleep(0.02 if d is None else min(max(d, 0.0), 0.05))
+
+    def wait_window(self, window=None):
+        return None
+
+    def wait_visibility(self, window=None):
+        return None
+
+    def bell(self):
+        return None
+
+    def clipboard_clear(self):
+        return None
+
+    def clipboard_append(self, s):
+        return None
+
+    def winfo_width(self):
+        return 0
+
+    winfo_height = winfo_width
+    winfo_reqwidth = winfo_width
+    winfo_reqheight = winfo_width
+    winfo_pointerx = winfo_width
+    winfo_pointery = winfo_width
+
+    def winfo_exists(self):
+        return 0 if self._destroyed else 1
+
+    def close(self):
+        """宿主收尾（C3/C4 的 `close()` 里调）。tk 档的 `close()` 是 no-op，
+        这里做**真实收尾** —— 那条不对称是 `_app_host` 明写的（那里没有"既有行为"
+        可破坏）。幂等。"""
+        if self._destroyed:
+            return
+        self._destroyed = True
+        self._closed = True
+        self._sched.close()
