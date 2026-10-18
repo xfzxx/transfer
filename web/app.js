@@ -266,12 +266,13 @@ function renderProfiles() {
     if (i === sel) li.classList.add("is-sel");
     li.title = it;
     li.onclick = () => invoke({ action: "select_list", target: "profile_listbox", index: i });
-    /* 双击 = 「设为当前」（Tk 档也是双击，见 transfer_form 里 profile_listbox 的绑定）。
-     * 用**行号**先选中再触发：双击的两下 click 与这条是同一批事件，靠轮询回来的
-     * selection 去判断"选的是哪一套"会慢半拍。 */
+    /* 双击 = 「编辑」（与「编辑…」按钮同一个入口）。
+     * 用**行号**先选中再打开：编辑的保存走 `profile_edit` 语义，它读的是后端
+     * Listbox 的当前选中项，不能只靠前端这份行号。双击的两下 click 与这条是同一批
+     * 事件，等 `select_list` 回来再开框，避免保存时改到上一行。 */
     li.ondblclick = async () => {
       await invoke({ action: "select_list", target: "profile_listbox", index: i });
-      await invoke({ action: "semantic", name: "profile_set_active" });
+      openProfileForm("edit", i);
     };
     ul.appendChild(li);
   });
