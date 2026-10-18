@@ -92,6 +92,14 @@ class TransferForm(object):
         return self._host.dest_path
 
     @property
+    def dest_path2(self):
+        return self._host.dest_path2
+
+    @property
+    def multi_dest(self):
+        return self._host.multi_dest
+
+    @property
     def dest_type(self):
         return self._host.dest_type
 
@@ -390,6 +398,18 @@ class TransferForm(object):
         self.dst_settings_btn = ttkbootstrap.Button(dst_frame, text="⚙", bootstyle="secondary-outline",
                                                     command=lambda: self._ftp_settings(is_source=False))
         self.dst_settings_btn.pack(side="left", padx=2)
+
+        # 【功能 3-4】第二个目标：一遍扫描 / 一次判重，落两处。
+        # 放在目标区**里面**（不新开分区）：它描述的就是"目标"，与上面那行是同一件事
+        # 的第二份落点；新开一个分区会多占一行标题高度，而 Tab1 的高度余量已经为 0。
+        dst2_frame = ttkbootstrap.Frame(dst_group)
+        dst2_frame.pack(fill="x", pady=(6, 0))
+        ttkbootstrap.Checkbutton(dst2_frame, text="同时复制到第二个目标", variable=self.multi_dest,
+                                 bootstyle="primary").pack(side="left", padx=(0, 8))
+        ttkbootstrap.Entry(dst2_frame, textvariable=self.dest_path2, width=30).pack(
+            side="left", fill="x", expand=True, padx=(0, 4))
+        ttkbootstrap.Button(dst2_frame, text="浏览", command=self._browse_dest2,
+                            bootstyle="secondary-outline").pack(side="left", padx=2)
 
         # ---- 选项（传输模式 / 文件过滤 / 扁平化 / 线程数）----
         # 【这里是"省 100px"里最实的一笔，逐行对应探针的账】
@@ -1036,6 +1056,16 @@ class TransferForm(object):
                 self.dest_path.set(os.path.normpath(path))
         else:
             self._handle_ftp_browse(is_source=False)
+    def _browse_dest2(self):
+        """第二个目标只可能是本地目录，所以**不分叉**：没有 FTP 那一支。
+
+        选完顺手把勾选框打上 —— 点「浏览」的意图就是"我要用第二个目标"，
+        再让用户回头去勾一下是多余的一步（勾选框仍然可以单独关掉）。
+        """
+        path = filedialog.askdirectory(title="选择第二个目标文件夹")
+        if path:
+            self.dest_path2.set(os.path.normpath(path))
+            self.multi_dest.set(True)
     def _handle_ftp_browse(self, is_source):
         cfg_attr = "ftp_source_config" if is_source else "ftp_dest_config"
         path_attr = "source_path" if is_source else "dest_path"
@@ -1104,6 +1134,37 @@ class TransferForm(object):
         # 删完把选中落到**原来那一项的位置**上（越界则落到最后一项），
         # 免得每删一个光标就跳回顶部 —— 连着删几个的时候很烦。
         self._refresh_source_listbox(select=min(i, len(self.source_list) - 1))
+    def _move_selected_source(self, delta):
+        """把选中的源上移 / 下移一格（`delta` = -1 / +1）。→ 新下标（动不了返回 None）。
+
+        【为什么要能排序】源是按列表顺序**串行**跑的，顺序就是执行顺序。以前只能
+        删掉再重新加一遍来调整，加回去却落在末尾 —— 想换两个源的先后得全重来。
+        到头 / 没选中都**静默不动**（与 `_remove_selected_source` 同一口径：
+        按钮语义直白，误点一下不该弹窗）。
+        """
+        sel = self.source_listbox.curselection()
+        if not sel:
+            return None
+        i = int(sel[0])
+        j = i + int(delta)
+        if not (0 <= i < len(self.source_list)) or not (0 <= j < len(self.source_list)):
+            return None
+        lst = self.source_list
+        lst[i], lst[j] = lst[j], lst[i]
+        self._refresh_source_listbox(select=j)
+        return j
+    def _dedupe_sources(self):
+        """去掉列表里的重复项（保留第一次出现的位置）。→ 删掉的条数。"""
+        seen, out = set(), []
+        for s in self.source_list:
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        removed = len(self.source_list) - len(out)
+        if removed:
+            self.source_list[:] = out
+            self._refresh_source_listbox(select=(len(out) - 1) if out else None)
+        return removed
     def _on_source_select(self, _event=None):
         """列表选中项 → `source_path`（单一真相的写回口）。"""
         sel = self.source_listbox.curselection()

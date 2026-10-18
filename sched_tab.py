@@ -347,6 +347,14 @@ class SchedTab(object):
         return self._host.dest_path
 
     @property
+    def dest_path2(self):
+        return self._host.dest_path2
+
+    @property
+    def multi_dest(self):
+        return self._host.multi_dest
+
+    @property
     def file_filter(self):
         return self._host.file_filter
 
@@ -503,6 +511,10 @@ class SchedTab(object):
             "source_path": self.source_path.get(),
             "source_list": list(self.source_list),
             "dest_path": self.dest_path.get(),
+            # 【功能 3-4】与白名单逐字对应。定时任务大多无人值守，
+            #   漏一个键的症状正是"界面上勾了第二目标、夜里跑起来只写了一份"。
+            "multi_dest": bool(self.multi_dest.get()),
+            "dest_path2": self.dest_path2.get(),
             "transfer_mode": self.transfer_mode.get(),
             "file_filter": self.file_filter.get(),
             "thread_count": int(self.thread_count.get()),

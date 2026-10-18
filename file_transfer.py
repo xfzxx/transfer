@@ -211,6 +211,14 @@ class _HostFormSink(object):
         return self._app.dest_path
 
     @property
+    def dest_path2(self):
+        return self._app.dest_path2
+
+    @property
+    def multi_dest(self):
+        return self._app.multi_dest
+
+    @property
     def dest_type(self):
         return self._app.dest_type
 
@@ -445,6 +453,14 @@ class _HostSchedSink(object):
     @property
     def dest_path(self):
         return self._app.dest_path
+
+    @property
+    def dest_path2(self):
+        return self._app.dest_path2
+
+    @property
+    def multi_dest(self):
+        return self._app.multi_dest
 
     @property
     def file_filter(self):

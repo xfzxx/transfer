@@ -20,6 +20,8 @@ r"""传输内核（`TransferCore`）—— 从 `FileTransferApp` 里切出来的
 """
 import datetime
 import errno
+import hashlib
+import json
 import os
 import queue
 import shutil
@@ -73,8 +75,8 @@ class TransferCore(object):
     _OVERWRITE_LOG_EVERY = 500
 
 
-    def __init__(self, *, hooks, launcher, live, headless_task, local_like_src, is_unc_path, db, lock, pause_event, stop_event, date_template, dest_path, dest_type, file_filter, flatten, ftp_timeout, reconnect_count, retry_count, source_path, source_type, thread_count, transfer_mode):
-        """构造。**全部按关键字传**（22 个参数，位置传太容易错）。
+    def __init__(self, *, hooks, launcher, live, headless_task, local_like_src, is_unc_path, db, lock, pause_event, stop_event, date_template, dest_path, dest_path2, dest_type, file_filter, flatten, ftp_timeout, multi_dest, reconnect_count, retry_count, source_path, source_type, thread_count, transfer_mode):
+        """构造。**全部按关键字传**（24 个参数，位置传太容易错）。
         
         `hooks` / `launcher` 是**必填**且逐个断言 callable：漏挂一个立刻 `TypeError`，
         而不是跑到某一步才静默少做一件事。
@@ -113,9 +115,11 @@ class TransferCore(object):
         self._stop_event = stop_event
         self.date_template = date_template
         self.dest_path = dest_path
+        self.dest_path2 = dest_path2
         self.dest_type = dest_type
         self.file_filter = file_filter
         self.flatten = flatten
+        self.multi_dest = multi_dest
         # 【缺陷形态⑤】`ftp_dest_config` / `ftp_source_config` / `source_list` 三个值的
         #   **真身都在宿主上**，且宿主会在构造之后重新赋值 ⇒ 不按值收快照，改经 `live`
         #   视图每次现读（视图只回指宿主）。三个都收快照时实测的后果见类 docstring。
@@ -150,6 +154,10 @@ class TransferCore(object):
         self._current_task_id = None
         self._db_task_src_root = ""
         self._task_extensions = None          # 本次任务的过滤器，重传时要复用
+        # 【功能 3-4】本次任务的两个目标根（主 / 第二）。由主线程在 `_launch_source`
+        #   快照；worker 只读。`_task_dst2_root` 为空 = 不做第二份。
+        self._task_dst1_root = ""
+        self._task_dst2_root = ""
         self._task_retry_attempts = config.DEFAULT_RETRY_COUNT + 1
         self._task_reconnect_attempts = config.DEFAULT_RECONNECT_COUNT + 1
         self._task_ftp_timeout = config.DEFAULT_TIMEOUT_S
@@ -756,6 +764,59 @@ class TransferCore(object):
             except ValueError:
                 pass   # 不同盘符时 commonpath 抛 ValueError，视为安全
 
+        # ---- 【功能 3-4】第二个目标：一次性把"能不能用"问完，再决定起不起跑 ----
+        # 只支持"本地 → 本地 ×2"：FTP 目标的第二份要另走一套上传池与重连重放，
+        # 且失败语义（远端半截文件）与本地完全不同，本版不做。
+        # 三道结构校验（不许省）：
+        #   ① 移动模式拒绝 —— 主目标那份写完就把源删了，第二份再拷时源已经不在；
+        #   ② 与源/主目标不许互相包含 —— 否则第二份会把主目标里的文件当成新源再扫一遍
+        #      （主目标在源内部的那条铁律同源，只是多了一个参与者）；
+        #   ③ 目录必须已存在 —— 与主目标同一条判据（`_probe_local_path`），
+        #      默默替你建目录会让"路径打错一个字"变成"凭空多了一棵树"。
+        multi_dst = ""
+        if bool(self.multi_dest.get()):
+            if dst_type != "local":
+                messagebox.showwarning("暂不支持", "第二个目标目前只支持本地文件夹（FTP 目标暂未支持）。")
+                return False
+            # FTP → 本地的下载走的是另一条 worker（`_atomic_write_download`），
+            # 第二份接在那条路上要另做一遍"下载后回读/远端 mtime"那套。
+            # 与其静默只写一份（用户以为备份了，其实没有），不如明说。
+            if src_type not in self._local_like_src:
+                messagebox.showwarning(
+                    "暂不支持",
+                    "第二个目标目前只支持「本地 / 共享 → 本地」这一种组合。\n"
+                    "FTP 来源请先把文件下载到本地，再以本地目录为源发起。")
+                return False
+            if self.transfer_mode.get() == "move":
+                messagebox.showerror("错误", "移动模式下不能同时复制到第二个目标：\n"
+                                            "第一份写完就会删除源文件，第二份无从可拷。\n"
+                                            "请改成「复制」，或取消第二个目标。")
+                return False
+            multi_dst = self.dest_path2.get().strip()
+            if not multi_dst:
+                messagebox.showwarning("警告", "请填写第二个目标路径")
+                return False
+            if not self._check_local_path(multi_dst, is_source=False):
+                return False
+            try:
+                a2 = os.path.abspath(multi_dst)
+                others = [("源文件夹", self.source_path.get().strip())
+                          if src_type in self._local_like_src else None,
+                          ("第一个目标", dst)]
+                for item in others:
+                    if item is None:
+                        continue
+                    label, other = item
+                    if not other:
+                        continue
+                    a1 = os.path.abspath(other)
+                    if os.path.commonpath([a1, a2]) in (a1, a2):
+                        messagebox.showerror(
+                            "错误", "第二个目标不能与%s相同，也不能互相包含。" % label)
+                        return False
+            except ValueError:
+                pass   # 不同盘符，必然不相交
+
         raw_filter = self.file_filter.get().strip()
         extensions = None
         if raw_filter:
@@ -799,6 +860,21 @@ class TransferCore(object):
         #   放在**这个位置**（校验过完、任务锁拿到之后）没有变：
         #   "校验没过 → 日志不动"这条既有行为保持原样。
         self._begin_run_log()
+
+        # 【功能 5-3】目标在本地盘时，开跑前看一眼剩余空间。
+        #   排在 `_begin_run_log()` **之后**：那一步会清屏，排前面等于没打。
+        if dst_type == "local":
+            self._warn_low_disk_space(self.dest_path.get().strip())
+            if multi_dst:
+                # 两个目标可能在不同盘上，各看一眼；主目标那句已经在上面打过了。
+                self._warn_low_disk_space(multi_dst)
+
+        # 【功能 3-4】两个目标根的**主线程快照**。worker 只读这两个值，
+        #   不碰 Tk 变量；每次起跑都重写一遍 —— 上一轮勾过、这一轮取消时要能关掉。
+        self._task_dst1_root = self.dest_path.get().strip() if dst_type == "local" else ""
+        self._task_dst2_root = multi_dst
+        if multi_dst:
+            self._ui._update_log("[参数] 第二目标 = %s" % multi_dst)
 
         # 【本轮修复·第二处】走到这里 = 本源**真的起跑了**（校验过完、任务锁拿到）。
         #   只记"起跑过几个"，不记"打算跑几个"—— 判据见 `_start_next_source` 里
@@ -881,6 +957,25 @@ class TransferCore(object):
         return True
 
 
+    def _warn_low_disk_space(self, path):
+        """目标盘剩余空间低于 `config.MIN_FREE_SPACE_WARN_GB` → 日志里喊一声。
+
+        【只喊不拦，是刻意的】剩余空间小不等于这次传不完（可能只传几个小文件），
+        而"这次到底要占多少"必须先扫全源 —— 几十万文件时那是几分钟的启动延迟，
+        为了一句提示不值。真传不完时每个文件都会失败，重试/失败计数与
+        `DiskFullError` 那条既有的即时中止路径会接手。
+        取不到（UNC 断了、路径刚被删）就静默：这只是一句提示，不该拖住任务。
+        """
+        try:
+            free_gb = shutil.disk_usage(path).free / float(1024 ** 3)
+        except Exception:                        # noqa: BLE001
+            return
+        limit = float(config.MIN_FREE_SPACE_WARN_GB)
+        if free_gb < limit:
+            self._ui._update_log(
+                "[警告] 目标盘剩余空间不足：%.1f GB（阈值 %.1f GB），"
+                "传输可能在途中失败" % (free_gb, limit))
+
     def _start_local_to_local(self, extensions):
         src = self.source_path.get().strip()
         dst = self.dest_path.get().strip()
@@ -892,6 +987,10 @@ class TransferCore(object):
         self._ui.progress.configure(mode="indeterminate", maximum=100, value=0)
         self._ui.progress.start(50)
         num_threads = self.thread_count.get()
+        # 【开跑回执】用户改了线程数之后，最直接的确认就是这行日志：
+        #   它打的是**本次真正拿去起线程的那个值**（不是设置页里的默认值），
+        #   与「启动 N 个源传输任务」一样排在清屏之后。
+        self._ui._update_log("[参数] 本次并发 = %d" % num_threads)
         if num_threads == 1:
             t = threading.Thread(target=self._stream_transfer, args=(src, dst, mode, extensions, flatten), daemon=True)
         else:
@@ -1048,19 +1147,111 @@ class TransferCore(object):
             else:
                 self._audit_overwrite(os.path.basename(src), dst, old, new_size, new_mtime)
                 return
+
+        # 【功能 6-5】断点续传：失败留下的 .part 若确认属于同一个源、且还没写满，
+        # 就接着写。判定与现场文件都见 _try_resume_local 的注释。
+        resume_from = self._try_resume_local(src, dst, part)
+        ctx_path = self._resume_ctx_path(dst)
         try:
-            shutil.copy2(src, part)
+            if resume_from is None:
+                self._write_resume_ctx(ctx_path, src, dst)
+                shutil.copy2(src, part)
+            else:
+                self._ui._update_log(
+                    "[续传] %s 上次已写 %.1f%%，从断点接着写"
+                    % (os.path.basename(src),
+                       100.0 * resume_from / max(1, new_size or resume_from)))
+                with open(src, "rb") as fs, open(part, "ab") as fp:
+                    fs.seek(resume_from)
+                    shutil.copyfileobj(fs, fp, 1024 * 1024)
+                try:
+                    shutil.copystat(src, part)   # copy2 正常路径会带的元数据，续写要手工补
+                except OSError:
+                    pass                         # 元数据抄不过去不该让一份完整内容作废
             os.replace(part, dst)
         except BaseException:
-            try:
-                os.remove(part)              # 失败不留 .part 残渣（写失败的那份不完整，无保留价值）
-            except OSError:
-                pass
+            if not self._resume_worth_keeping(src):
+                # 回滚/小文件：仍按老行为清理，不留残渣
+                for p in (part, ctx_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
             raise
+        try:
+            os.remove(ctx_path)              # 成功后旁挂文件就没用了
+        except OSError:
+            pass
         self._audit_overwrite(os.path.basename(src), dst, old, new_size, new_mtime)
         if mode == "move":
             # 铁律二：dst 已完整 → 才删源。删源失败会让本文件记 failed（下次重做，不丢数据）
             os.remove(src)
+
+
+    # 【功能 6-5-新增】本地 → 本地断点续传的三块拼图：
+    #   ① 旁挂文件放 DATA_DIR 下的 `LOCAL_RESUME_CTX_DIR`，**不污染目标目录**；
+    #      名字取目标绝对路径的 md5 —— 目标路径本身可能很长，md5 保证唯一且定长。
+    #   ② 旁挂文件里记 (src 绝对路径, 源 size, 源 mtime_ns) 三项。
+    #      只留 .part 而不记来历是不行的：同一个目标今天可能由 A 传、明天由 B 传，
+    #      把 A 的半截接在 B 的屁股上会得到**大小对得上、内容错位**的文件，
+    #      比整份重传更糟。三项全同才敢续。
+    #   ③ 失败时**默认保留** .part（这正是续传的本钱）；关掉开关或文件太小则照老规矩删。
+    #      半截文件永远停在 `.part` 名下，`os.replace` 没成功它就成不了正式名 ——
+    #      阶段2b 的"目标存在 == 目标完整"铁律不受影响。
+    @staticmethod
+    def _resume_ctx_path(dst):
+        try:
+            key = hashlib.md5(os.path.abspath(dst).encode("utf-8", "surrogatepass")).hexdigest()
+        except Exception:
+            return ""
+        return os.path.join(config.LOCAL_RESUME_CTX_DIR, key + ".json")
+
+    def _resume_worth_keeping(self, src):
+        """这条路径值不值得留续传现场：开关开着，且源文件够大。"""
+        if not getattr(config, "LOCAL_RESUME_ENABLED", False):
+            return False
+        try:
+            return os.path.getsize(src) >= config.LOCAL_RESUME_MIN_BYTES
+        except OSError:
+            return False
+
+    def _write_resume_ctx(self, ctx_path, src, dst):
+        if not ctx_path or not self._resume_worth_keeping(src):
+            return
+        try:
+            _precision, size, mtime = config._stat_for_state(src)
+            os.makedirs(config.LOCAL_RESUME_CTX_DIR, exist_ok=True)
+            tmp = ctx_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"src": os.path.abspath(src),
+                           "dst": os.path.abspath(dst),
+                           "size": size,
+                           "mtime_ns": mtime,
+                           "at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                          f, ensure_ascii=False)
+            os.replace(tmp, ctx_path)
+        except (OSError, ValueError):
+            pass                             # 记不下来只影响"下次能不能续"，不影响本次拷贝
+
+    def _try_resume_local(self, src, dst, part):
+        """能续就返回已写字节数，否则返回 None（调用方整份重拷）。"""
+        ctx_path = self._resume_ctx_path(dst)
+        if not ctx_path or not self._resume_worth_keeping(src):
+            return None
+        try:
+            with open(ctx_path, "r", encoding="utf-8") as f:
+                ctx = json.load(f)
+            _precision, src_size, src_mtime = config._stat_for_state(src)
+            if (ctx.get("src") != os.path.abspath(src)
+                    or int(ctx.get("size")) != int(src_size)
+                    or int(ctx.get("mtime_ns")) != int(src_mtime)):
+                return None                  # 换了源 / 源改过 → 半截作废
+            offset = os.path.getsize(part)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+        if offset <= 0 or offset > int(src_size):
+            return None                      # 空 .part 没意义；比源还大则必然不是这份内容
+        return offset
 
 
     # 【阶段2c-新增】FTP → 本地的原子落盘（方案 §2）。铁律一同样适用：
@@ -1284,6 +1475,32 @@ class TransferCore(object):
             if done % 50 == 0:
                 self._ui._threadsafe_log(f"已处理 {done} 个文件")
             self._db_enqueue(("done", src_path, target_path))     # 【阶段2a】成功埋点
+            # ---- 【功能 3-4】第二份 ----
+            # 只在**主目标已经完整落盘之后**才动手：主目标是这次任务的验收对象，
+            #   第二份是附加承诺。顺序反过来的话，主目标失败而第二份成功，
+            #   用户会看到一个"失败"的文件其实在另一块盘上躺着 —— 比只写一处更难解释。
+            # 相对路径取自主目标根，于是目录结构、扁平化、同名改名（`_plan_target`）
+            #   三件事**自动**与主目标一致，不需要在这里重算一遍。
+            # 失败**不静默**：记进 failed 清单并按同一套连续失败阈值处理 ——
+            #   第二块盘掉线/写满时，行为与主目标掉线一致（中止，而不是一路空跑）。
+            if self._task_dst2_root and self._task_dst1_root:
+                try:
+                    rel = os.path.relpath(target_path, self._task_dst1_root)
+                except ValueError:
+                    rel = os.path.basename(target_path)
+                if rel.startswith(".."):
+                    rel = os.path.basename(target_path)
+                dst2 = os.path.normpath(os.path.join(self._task_dst2_root, rel))
+                ok2, err2 = self._copy_with_retry(shutil.copy2, src_path, dst2, "copy")
+                if ok2:
+                    self._note_transfer_result(True)
+                else:
+                    with self._lock:
+                        failed.append((src_path, dst2, "第二目标：" + err2))
+                    self._ui._threadsafe_log("第二目标失败: %s - %s" % (src_path, err2))
+                    self._db_enqueue(("failed", src_path, dst2, "第二目标：" + err2))
+                    if self._note_transfer_result(False):
+                        self._abort_on_consec_failures()
             if mode == "move":
                 # 【阶段2b】铁律二（方案 §1.3）：dst 已完整 → 源已删除 → 标记 src_deleted=1。
                 # 能走到这里说明 _atomic_write_local 的 os.remove(源) 已成功；

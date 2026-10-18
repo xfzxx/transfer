@@ -84,6 +84,10 @@ CONFIG_FILE = os.path.join(DATA_DIR, ".ftp_transfer_config.json")
 
 MAX_LOG_LINES = 1000
 
+# 程序版本（窗口标题 / 「关于」/ 诊断包共用这一份）。以前标题里写死 "v2.4"，
+# 换了包版本号也不会变；集中到这里之后，改版本只需改这一行。
+APP_VERSION = "2.5.0"
+
 # ===================== 阶段1：线程安全 UI 通道参数 =====================
 # 【回滚开关】置 False 即整体退回"后台线程直接 root.after"的旧行为。
 # 保留至阶段3压测通过；阶段6摘除 False 分支时，本常量定义仍保留（历史回滚开关，已废弃）。
@@ -249,6 +253,21 @@ FTP_PROGRESS_MAX_MSGS = 1000
 # 去问"远端那份还在不在、大小对不对"。惰性很重要——首次上传时库里压根没有记录，
 # 绝大多数文件在第 ① 条就返回了，不该为它们白付一次往返。
 # 回滚：把 _should_skip 的调用点去掉 dst_probe 参数即退回"上传全量重传"（2c 行为）。
+# 【功能 6-5】本地 → 本地断点续传：失败/中断时**保留** `.part`（并在
+# `LOCAL_RESUME_CTX_DIR` 里留一份"这半截属于哪个源"的旁挂 JSON），
+# 下次对同一个目标再传时从已写到的位置接着写，而不是整份重来。
+# 关掉它 = 回到"失败即删 .part、下次整份重拷"的老行为（一行回滚）。
+LOCAL_RESUME_ENABLED = True
+
+# 只对**够大**的文件留续传现场。小文件整份重拷比"读一次旁挂文件 + 写一次旁挂文件"
+# 还便宜，而且小文件本来就是成批出现（几千个），每个都多两次落盘会把吞吐拖下去。
+LOCAL_RESUME_MIN_BYTES = 4 * 1024 * 1024
+
+# 续传旁挂文件（目标路径 md5 → `.json`）的落点：**不放在目标目录**。
+# 目标目录是用户的数据区，往里塞隐藏小文件既脏又会被别处的"数一数目标里有多少文件"
+# 误计。DATA_DIR 已经是本工具的私有区（库、配置、UX 状态都在这儿），放这里天然隔离。
+LOCAL_RESUME_CTX_DIR = os.path.join(DATA_DIR, ".ftp_transfer_parts")
+
 UPLOAD_RESUME_ENABLED = True
 
 # 【阶段5-新增】远端半截 .part 的回收。场景：进程被强杀/断电时 STOR 停下来，
@@ -1032,12 +1051,45 @@ def load_last_config():
     return None
 
 
-def save_config(config):
+def _write_json_atomic(path, payload, **dump_kw):
+    r"""把 JSON **整份、原子地**写到 `path`。返回是否写成功。
+
+    【为什么必须原子】下面这几个文件全是"整份覆盖"写的。原实现直接
+    `open(path, "w")` —— 断电/崩溃/杀进程正好撞上写盘，留下的就是半截 JSON。
+    读取方（`load_ux_state` / `load_profiles` / `load_schedules`）遇到坏 JSON
+    一律按"没有历史"处理 ⇒ 界面设置、FTP 配置、甚至整份计划任务清单会
+    **静默消失**，而任何一个函数都不会抛错、日志里也没有一行。
+
+    做法：写同目录临时文件 → `flush` + `fsync` → `os.replace` 顶替。
+    同一卷上 `os.replace` 是原子的：读者要么看到旧的整份、要么看到新的整份。
+
+    【失败仍然静默，但返回值要诚实】调用方的口径不变（记住设置是锦上添花，
+    不该让一次写盘失败打断传输），但新增的「保存」按钮要能如实说出
+    "已生效、但没写进文件" —— 所以这里返回布尔值，而不是继续 `pass`。
+    """
+    tmp = path + ".tmp"
     try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
-    except:
-        pass
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, **dump_kw)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        # 失败时别把半截临时文件留在目录里（下一次写会覆盖它，但用户会看见一个
+        # 莫名其妙的 `.tmp`）。删不掉也不上抛 —— 口径与本文开头一致。
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def save_config(config):
+    return _write_json_atomic(CONFIG_FILE, config)
 
 
 # ===================== 功能A：界面状态（上次用的路径 / 模式 / 过滤 / 线程数） =====================
@@ -1079,12 +1131,12 @@ def load_ux_state():
 
 
 def save_ux_state(state):
-    """写界面状态。失败静默（理由见上）。"""
-    try:
-        with open(UX_STATE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=2)
-    except:
-        pass
+    """写界面状态。失败静默（理由见上），但返回是否真的写进文件。
+
+    改用原子写（`_write_json_atomic`）：这份文件存着"上次用的路径 / 设置页默认参数"，
+    写坏一次就等于用户下次启动时这些全部回到默认，而症状只是"设置没记住"。
+    """
+    return _write_json_atomic(UX_STATE_FILE, state)
 
 
 # ===================== 阶段二：多套 FTP 配置 =====================
@@ -1189,14 +1241,15 @@ def load_profiles():
 
 
 def save_profiles(profiles, active):
-    """写多套配置。失败静默（口径与 `save_config` / `save_ux_state` 一致）。"""
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump({"version": CONFIG_VERSION,
-                       "active": active,
-                       "profiles": list(profiles)}, f, indent=2)
-    except:
-        pass
+    """写多套配置。失败静默（口径与 `save_config` / `save_ux_state` 一致）。
+
+    原子写：这份文件里有 FTP 口令。写坏一次 = 全部配置消失，而用户只看到
+    "配置列表是空的"，没有任何一行错误可查。
+    """
+    return _write_json_atomic(CONFIG_FILE,
+                              {"version": CONFIG_VERSION,
+                               "active": active,
+                               "profiles": list(profiles)})
 
 
 def save_profile(name, cfg):
@@ -1419,17 +1472,13 @@ def save_schedules(schedules):
     盖掉磁盘上的全部任务，那正是 `_probe_profile_clobber.py` 实测过的丢失形态。
     只有"我手里这份就是全部"时才可以直接调（界面上的保存按钮即是）。
     """
-    try:
-        os.makedirs(os.path.dirname(SCHEDULE_FILE), exist_ok=True)
-    except:
-        pass
-    try:
-        with open(SCHEDULE_FILE, 'w', encoding='utf-8') as f:
-            json.dump({"version": SCHEDULE_VERSION,
-                       "schedules": list(schedules)}, f, indent=2,
-                      ensure_ascii=False)
-    except:
-        pass
+    # 原子写：这份文件是"全部计划任务"的唯一一份清单。写坏一次 = 界面上一条任务都
+    # 不剩（系统任务计划里那些还在，但工具再也认不出它们），属于最容易"静默丢数据"
+    # 的一处。`_write_json_atomic` 自己会建目录，原处的 makedirs 合并进去。
+    return _write_json_atomic(SCHEDULE_FILE,
+                              {"version": SCHEDULE_VERSION,
+                               "schedules": list(schedules)},
+                              ensure_ascii=False)
 
 
 def save_schedule(rec):
@@ -1700,6 +1749,12 @@ DEFAULT_DB_KEEP_DAYS = DB_PRUNE_AFTER_DAYS       # 730，与启动维护的默�
 DB_KEEP_DAYS_RANGE = (30, 3650)
 
 DEFAULT_LOG_EXPORT_DIR = ""      # 空 = 沿用系统默认（弹保存框时的起始目录）
+
+# 目标盘剩余空间预警阈值（GB）。0 = 关闭预警。
+# 【为什么是常量、不是设置项】这一项是"提醒"，不是"功能开关"：阈值定得太死会让
+# 备份中途失败的风险上升，定得太松则天天误报。2 GB 对 DICOM 批量传输是个保守的
+# 下限（一个 CT 序列通常几十到几百 MB），先按这个值跑；要按科室调再提升为设置项。
+MIN_FREE_SPACE_WARN_GB = 2
 
 
 # ===================== 功能B：实时速度 / ETA =====================

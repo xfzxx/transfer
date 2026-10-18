@@ -569,7 +569,7 @@ class AppBootstrapper:
         # 之后再换主题，已经建好的控件不会自己回头重画（得手动 `_retheme`）。
         # 放在 `title` 之前无所谓先后，放在任何 `_build_ui` 之前**有所谓**。
         _ensure_ui_theme(root)
-        self._app.root.title("文件传输工具 v2.4")
+        self._app.root.title("文件传输工具 v%s" % config.APP_VERSION)
         # 【功能A/B-修 UI 缺陷】680x520 → 880x620 →（功能C1）880x640 →（C1 裁定）880x660
         #   →（D-1 步 5）**880x690**（这一笔的完整理由见下面 ③）。
         # **每次只改了这两个数字**，控件结构、位置、顺序、名称一个字符没动，
@@ -685,6 +685,12 @@ class AppBootstrapper:
         self._app.file_filter = StringVar()
         self._app.flatten = BooleanVar(value=False)
         self._app.thread_count = IntVar(value=1)
+        # 【功能 3-4】第二个目标（一次任务同时复制到两处）。
+        #   刻意**不做成 `dest_type2` 菜单**：FTP 目标的第二份要另走一套上传池与
+        #   重连重放，风险远大于收益，本版只支持"本地 → 本地 × 2"。
+        #   勾选框是总闸；不勾时 `dest_path2` 里留着上次的路径也不会生效。
+        self._app.multi_dest = BooleanVar(value=False)
+        self._app.dest_path2 = StringVar()
 
         # ---- 阶段二：设置页（Tab2）的默认参数 ----
         # 【为什么线程数**没有**新变量】它就是上面那个 `thread_count`。
@@ -868,7 +874,9 @@ class AppBootstrapper:
             stop_event=self._app._stop_event,
             date_template=self._app.date_template,
             dest_path=self._app.dest_path,
+            dest_path2=self._app.dest_path2,
             dest_type=self._app.dest_type,
+            multi_dest=self._app.multi_dest,
             file_filter=self._app.file_filter,
             flatten=self._app.flatten,
             ftp_timeout=self._app.ftp_timeout,
@@ -1196,6 +1204,12 @@ class AppBootstrapper:
             "source_list": local_sources,
             "dest_path": (self._app.dest_path.get().strip()
                           if self._app.dest_type.get() == "local" else ""),
+            # 【功能 3-4】第二个目标。**只有勾着才落盘**：没勾时存的路径没有意义，
+            #   而"下次打开发现第二目标还勾着"比"要重新填一次"更容易出事故
+            #   （多写一份到一块快满的盘上）。
+            "multi_dest": bool(self._app.multi_dest.get()),
+            "dest_path2": (self._app.dest_path2.get().strip()
+                           if self._app.multi_dest.get() else ""),
             "transfer_mode": self._app.transfer_mode.get(),
             "file_filter": self._app.file_filter.get().strip(),
             "thread_count": int(self._app.thread_count.get()),
@@ -1288,6 +1302,13 @@ class AppBootstrapper:
         if isinstance(st.get("dest_path"), str) and st["dest_path"]:
             self._app.dest_path.set(st["dest_path"])
             filled += 1
+        # 【功能 3-4】第二个目标。两项都验类型，且**先路径后开关**：
+        #   开关打开却没有路径 = 一按开始就被校验挡下，属于"配了但跑不了"。
+        #   反过来（有路径、开关关）是安全状态，所以只在前一项形状对时才认开关。
+        if isinstance(st.get("dest_path2"), str):
+            self._app.dest_path2.set(st["dest_path2"])
+        if isinstance(st.get("multi_dest"), bool) and self._app.dest_path2.get().strip():
+            self._app.multi_dest.set(st["multi_dest"])
         if st.get("transfer_mode") in ("copy", "move"):
             self._app.transfer_mode.set(st["transfer_mode"])
         if isinstance(st.get("file_filter"), str):

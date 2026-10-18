@@ -90,6 +90,10 @@ class FtpTransfer(object):
         # 【阶段3】并发度同样在主线程读：worker 线程碰 Tk 变量是数据竞争
         # （与上面 remote_url 的处理同理）。
         workers = self._ftp_pool_workers()
+        # 【开跑回执】实际并发：池开关关掉时是 1（与 `_ftp_download_worker` 的分支一致），
+        #   不能照着 `workers` 报，否则日志会说"4 个并发"而实际单连接在跑。
+        self._ui._update_log("[参数] 本次并发 = %d"
+                             % (workers if config._FTP_POOL_ENABLED else 1))
         threading.Thread(target=self._ftp_download_worker, args=(cfg, dst, extensions, remote_url, flatten, workers), daemon=True).start()
 
     # 【阶段3-新增】FTP 并发度的唯一出口。
@@ -895,6 +899,8 @@ class FtpTransfer(object):
         remote_url = self.dest_path.get().strip()   # Tk 变量在主线程读取
         flatten = self.flatten.get()
         workers = self._ftp_pool_workers()          # 【阶段3】同上，主线程读 Tk
+        self._ui._update_log("[参数] 本次并发 = %d"
+                             % (workers if config._FTP_POOL_ENABLED else 1))
         threading.Thread(target=self._ftp_upload_worker, args=(src, cfg, extensions, remote_url, flatten, workers), daemon=True).start()
 
     # 【阶段2c-已补】本函数原先**刻意不加状态库埋点**（2a 阶段唯一的传输路径豁免），

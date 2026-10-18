@@ -40,6 +40,49 @@ html, body {
   background: #eaf3fc;
   color: var(--primary-dark);
 }
+
+/* 常驻提示条：错误/警告留下来，直到用户点「知道了」。 */
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 18px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #f0c9c6;
+  background: #fdecea;
+  color: #8f2320;
+  white-space: pre-wrap;
+}
+.notice[hidden] { display: none; }
+.notice.notice-warn { border-color: #f3d3b5; background: #fff4e8; color: #8a4b0b; }
+
+/* 设置页的草稿保存栏 */
+.savebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  position: sticky;
+  bottom: 0;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, .06);
+  z-index: 5;
+}
+.savebar-text { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: var(--muted); }
+.savebar.is-dirty .savebar-text #settings-status { color: var(--warn); font-weight: 600; }
+#settings-err { color: var(--danger); }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.input.is-invalid { border-color: var(--danger); outline: 2px solid #f6c7c5; }
+.input-filter { width: 150px; }
+.check.small { font-size: 12.5px; color: var(--muted); }
+/* 设置页有未保存的改动时，标签页上挂一个点 —— 切去别的页面也不会忘。 */
+.tab.has-dirty::after { content: " ●"; color: var(--warn); }
 .badge-dim { background: #eef0f2; color: var(--muted); }
 .badge-ok { background: #e8f7e2; color: #2c7a12; }
 .badge-err { background: #fdecea; color: #a52b27; }
@@ -140,6 +183,34 @@ main { padding: 16px 18px 40px; max-width: 960px; margin: 0 auto; }
 .list:empty::after { content: "（空）"; color: var(--muted); font-size: 12px; }
 
 .hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; white-space: pre-wrap; }
+/* 行内的次要说明（老版那些 `bootstyle="secondary"` 的小字）。原本 index.html 里
+   `class="muted"` 已经用了（进度条那行），但没有对应规则 —— 顺手补上。 */
+.muted { color: var(--muted); font-size: 12.5px; }
+
+/* 源「浏览」的三项菜单（老版 `tk.Menu` 的替身）：浮在按钮下面，点别处自动收。 */
+.menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 140px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+}
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.menu-item:hover { background: #f0f4f8; }
 
 .progress {
   height: 14px;
