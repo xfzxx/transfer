@@ -959,6 +959,10 @@ class AppBootstrapper:
                 "retry_done": self._app._core._retry_failed_done,
                 "error": self._app._core._transfer_error,
                 "sched_check": self._app._sched._sched_check_done,
+                # 【批 1 修复】「清空状态库」的回执。`maintenance_worker._purge_worker`
+                #   把结果投成 `_post_ui("purge_done", rep)`；这里不登记 ⇒ 消息被
+                #   分发端当"未知类型"丢掉（见 `137_立项_清空状态库回执丢失.md`）。
+                "purge_done": self._app._maint._purge_done,
                 "task_end": self._app._core._dispatch_task_end,
                 "title": self._app._set_title,
                 "terminal_fallback": self._app._core._transfer_finished,
@@ -999,7 +1003,8 @@ class AppBootstrapper:
         self._app.root.protocol("WM_DELETE_WINDOW", self._app._on_close)
 
         # 【第 1 步-搬走】这张消息表已归 `_ui`（`_ui_handlers`），
-        #   在它构造时建立：本类自己的 5 条 + 上面 `handlers=` 传进去的 8 条。
+        #   在它构造时建立：本类自己的 5 条 + 上面 `handlers=` 传进去的 **9 条**
+        #   （批 1 之前是 8 条；新增的是 `"purge_done"`）。
         #   原先"必须在 _build_ui() 之后构建，因为 _update_log 依赖 log_text"
         #   这条约束，现在由 `attach_widgets()` 的挂载时机保证。
 

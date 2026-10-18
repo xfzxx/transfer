@@ -225,7 +225,12 @@ class MaintenanceWorker(object):
             rep = self._db.purge(tables=tables, log=self._ui._threadsafe_log)
         except Exception as e:
             rep = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
-        self._ui._post_ui(lambda: self._purge_done(rep))
+        # 【批 1 修复】回执必须走**字符串 kind**：`_post_ui(kind, *payload)` 的 kind 是
+        #   `_ui_handlers` 的字典键，投一个 lambda 进去 ⇒ 分发端查不到 handler
+        #   ⇒ 记一行"未知的 UI 消息类型"就把消息**吞掉**：记录真被清了（DELETE + VACUUM
+        #   都落了盘），可 `_purge_done` 永不执行 ⇒ 清空按钮卡在 disabled、内存里的失败
+        #   清单也不清。handler 的登记在 `app_bootstrapper` 的 `handlers=` 表里。
+        self._ui._post_ui("purge_done", rep)
 
     def _purge_done(self, rep):
         self.purge_btn.configure(state="normal")
