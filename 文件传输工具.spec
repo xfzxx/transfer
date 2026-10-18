@@ -59,19 +59,32 @@ _tb_hidden = collect_submodules('ttkbootstrap')
 #   "开发态看不见、打包才炸"的 bug。
 #   ⇒ 用 `datas` 把整个 `web\` 目录原样带上，运行时落点在 `sys._MEIPASS\web\`，
 #     与 `web_app.WEB_DIR` 的探测逻辑对齐。
+#
+# 【pywebview 的资源同理，且更隐蔽】C3 壳靠 pywebview，它运行时会把自带的
+#   `js\*.js`（JS 桥）注入到页面里。这些是非 .py 文件，PyInstaller 默认不带 ⇒
+#   C3 下 `window.pywebview` 永远不出现（`pump` 节拍器失效）。所以
+#   `collect_data_files('webview')` 一并打进来。
 import os
+from PyInstaller.utils.hooks import collect_data_files as _cdf
+
 # `SPECPATH` 由 PyInstaller 注入 = 本 spec 所在目录（可靠）；老版本没有时退回 cwd。
 _here = globals().get("SPECPATH") or os.path.abspath(os.getcwd())
 _web_datas = [(os.path.join(_here, 'web'), 'web')]
+_pv_datas = _cdf('webview')
+# pywebview 按**平台名**动态 import（如 `webview.platforms.edgechromium`），
+# 静态分析跟不到 ⇒ 显式 collect_submodules。
+_pv_hidden = collect_submodules('webview')
 # 单文件 exe 红线：这些都进 `a.datas`，仍由 bootloader 解包到临时目录 ⇒ 不破坏单文件。
 # ============================ 功能C3/C4：Web 前端资源 ============================
 
 a = Analysis(
-    ['file_transfer.py'],
+    # 入口 = Web 宿主（内部 `import file_transfer` ⇒ 业务代码全部纳入）。
+    # `host_probe.detect()` 开机自检决定 C3 / C4；命令行 `--c3/--c4` 可强制。
+    ['web_app.py'],
     pathex=[],
     binaries=[],
-    datas=_tb_datas + _web_datas,
-    hiddenimports=_tb_hidden + ['PIL._tkinter_finder'] + ['web_kit', 'web_app', 'web_host'],
+    datas=_tb_datas + _web_datas + _pv_datas,
+    hiddenimports=_tb_hidden + ['PIL._tkinter_finder'] + ['web_kit', 'web_app', 'web_host'] + _pv_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -351,6 +351,17 @@ async function tick() {
   }
 }
 
+/* C3 专用：pywebview 的 JS→Python 调用派发在**主线程**上，用它当主线程节拍器，
+   替 `ui_channel` 的 UI 泵跑 `root.run_pending()`（C4 由 HTTP 等待循环泵）。
+   C4 下 `window.pywebview` 不存在，此函数是零成本 no-op —— 前端仍是**同一份**。 */
+function hostPump() {
+  try {
+    if (window.pywebview && window.pywebview.api && window.pywebview.api.pump) {
+      window.pywebview.api.pump();
+    }
+  } catch (e) { /* 宿主未就绪：忽略 */ }
+}
+
 function main() {
   bindTabs();
   bindVars();
@@ -359,6 +370,7 @@ function main() {
   bindPicker();
   tick();
   setInterval(tick, POLL_MS);
+  setInterval(hostPump, 50);
 }
 
 document.addEventListener("DOMContentLoaded", main);

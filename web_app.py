@@ -522,58 +522,57 @@ def run_c4(bridge, port=DEFAULT_PORT, open_browser=True):
 # =============================================================================
 # C3：pywebview 窗口（宿主事件循环 = pywebview 的循环，主线程）
 # =============================================================================
-def run_c3(bridge, title=None):
-    r"""C3：用 pywebview 开一个 WebView2 窗口，前端仍是同一份 `web/`。
+def run_c3(bridge, port=DEFAULT_PORT, title=None):
+    r"""C3：`pywebview` 窗口（WebView2）＋ **本地 HTTP 服务**，前端仍是同一份 `web/`。
 
-    【为什么事件循环在主线程也成立】pywebview 的 `webview.start()` 会**阻塞主线程**
-    跑它自己的循环 —— 而 `SchedulerStub.run_pending()` 必须由主线程调。所以这里
-    用一个**后台线程**按 10ms 节奏……不行：后台线程调 `run_pending` 会撞
-    `ui_channel` 的主线程断言。⇒ 正解是 pywebview 的 `webview.start(func=...)`
-    里传一个"循环体"？pywebview 没有稳定的 per-frame 钩子。本项目 C3 走的是
-    **`webview.serve` 不可用时的兜底**：pywebview 仍开窗口，但调度泵交给一个
-    `webview` 的 timer —— 见 `run_c3` 的实现说明（下面用 `js_api` 轮询驱动）。
+    【为什么 C3 也起 HTTP】前端是 `fetch` 轮询的**同一份**代码（无框架、无构建器）。
+    不为了 C3 再写一套 `pywebview.api` 传输层 —— 窗口直接指向
+    `http://127.0.0.1:port/`，HTTP 面与 C4 **逐字节相同**；C3 与 C4 的差别**只在壳**
+    （WebView2 窗口 vs 系统浏览器）。**只听 127.0.0.1**。
 
-    ⚠️ 本函数在**没有 pywebview** 的环境下抛 ImportError（响亮失败）。
+    【为什么还要 `js_api.pump`】`ui_channel` 的 UI 泵必须在**主线程**按节奏调
+    `root.run_pending()`。而 pywebview 的 `webview.start(func)` 把 `func` 丢进
+    **子线程**（pywebview `__init__.py:294` `Thread(target=func)`），不能用来泵。
+    但 **JS→Python 调用（`js_api`）经 WebView2 的 `WebMessageReceived` 派发，
+    就在主线程**（`platforms/edgechromium.py:225 on_script_notify` → `js_bridge_call`）。
+    ⇒ 前端用一个 50ms `setInterval` 调 `window.pywebview.api.pump()` 当主线程节拍器。
+    这条链一旦断了，症状是"进度/日志不动"—— `hostPump` 里吞异常只是为了不让桥崩，
+    真正判它是否在跑仍靠端到端用例。
+
+    ⚠️ 没有 pywebview 的环境抛 ImportError（响亮失败，绝不静默退回 C4）。
     """
     import webview                                       # 没有就 ImportError
+    from http.server import ThreadingHTTPServer
 
+    srv = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(bridge))
+    threading.Thread(target=srv.serve_forever, daemon=True,
+                     name="web-http-c3").start()
+    url = "http://127.0.0.1:%d/" % port
     root = bridge.root
 
     class _Api(object):
-        def snapshot(self):
-            return bridge.snapshot()
-
-        def invoke(self, target, action, payload=None):
-            return bridge.invoke(target, action, payload)
-
         def pump(self):
-            # 前端每帧调一次：**JS 回调线程**不是主线程，但 pywebview 的 JS bridge
-            # 回调在 pywebview 内部是串行派发到主线程事件循环的，所以这里直接
-            # 让主线程那一份 `run_pending` 由下面的 `_ticker` 负责更稳妥。
-            return root.pending_count()
+            # 主线程节拍：清空到期的 after 回调（进度 / 日志 / 队列泵）。
+            # 非主线程调用会撞 `SchedulerStub.run_pending` 的主线程断言 ——
+            # 捕获它，避免把 pywebview 的桥整个带崩（真出问题会在端到端用例里暴露）。
+            try:
+                return root.run_pending()
+            except Exception:                            # noqa: BLE001
+                return None
 
-    # 用一个 pywebview 的窗口 + 一个主线程里的 ticker 线程是矛盾的，所以 C3 的
-    # 正确落点是把"泵"塞进 pywebview 的循环：pywebview 支持 `webview.start(func)`
-    # 在循环启动后于**主线程**调用 func 一次。这个项目当前只需保证 C4 全绿；
-    # C3 的窗口/桥就绪即可（前端代码逐字节相同）。
-    window = webview.create_window(
-        title or root._title or "文件传输工具 v2.4",
-        url=os.path.join(WEB_DIR, "index.html"),
-        js_api=_Api())
-
-    def _start():
-        # `webview.start(func)` 在主线程、窗口就绪后调用一次。
-        # 之后 C3 的调度由前端轮询 + 前端动作驱动（`invoke` 里 `call_on_main`
-        # 依赖的 `after` 队列由每次 `run_pending` 机会清空）—— 见 133 号报告。
-        pass
-
-    webview.start(_start, debug=False)
+    webview.create_window(title or root._title or "文件传输工具 v2.4",
+                          url=url, js_api=_Api())
+    try:
+        webview.start()
+    finally:
+        srv.shutdown()
+        srv.server_close()
     return 0
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    mode = "c4"
+    mode = None                       # None ⇒ 交给 `host_probe` 开机自检
     port = DEFAULT_PORT
     no_browser = False
     i = 0
@@ -591,8 +590,13 @@ def main(argv=None):
         i += 1
 
     bridge = build()
+    if mode is None:
+        # 开机自检：.NET FW + WebView2 都满足 ⇒ C3；否则 C4。`detect()` 任何异常
+        # 都回 C4（详见 host_probe 的判据）。
+        import host_probe
+        mode = host_probe.detect()
     if mode == "c3":
-        return run_c3(bridge)
+        return run_c3(bridge, port=port)
     return run_c4(bridge, port=port, open_browser=not no_browser)
 
 
