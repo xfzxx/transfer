@@ -221,6 +221,22 @@ function renderWidgetStates() {
     const label = wtext("sched_toggle_btn");
     if (label) toggle.textContent = label;
   }
+  /* 「暂停/继续」是**同一个按钮**：`_toggle_pause` 在暂停时把它写成
+   * `configure(text="继续")`。这里必须跟「启/停」一样从模型里取 —— 写死成
+   * 「暂停」的话，用户暂停后看到的仍是「暂停」，会以为"再点一次是重新暂停"，然后去点
+   * 灰掉的「开始传输」（任务活动期间它本来就不可点），现象就是"点开始没反应"。
+   * 按钮的 `state` 每轮都在同步（上面那段），文字漏同步等于只修了一半。 */
+  const pause = $('[data-click="pause_btn"]');
+  if (pause) {
+    const label = wtext("pause_btn");
+    if (label) pause.textContent = label;
+  }
+  /* 任务进行中时「开始传输」是灰的：把原因挂在 title 上，别让人反复点。
+   * 暂停状态下恢复的正确入口是那个已经变成「继续」的按钮。 */
+  const start = $('[data-click="start_btn"]');
+  if (start) {
+    start.title = start.disabled ? "任务进行中：要恢复请点「继续」，开始只用于新任务" : "";
+  }
 }
 
 function renderSources() {
