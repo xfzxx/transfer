@@ -1103,6 +1103,12 @@ class TransferForm(object):
             if is_source:
                 self._add_source(full_url)
             cfg['remote_dir'] = dlg.result
+            # 只更新**当前那一套**：整份 `save_config` 会把 JSON 覆盖成扁平 5 键，
+            # 其余几套配置（含主机/口令）会从磁盘上消失。没有当前配置名时
+            # 保留旧的整份覆盖（此时也只有一套，兼容既有调用口径）。
+            if self.ftp_active:
+                config.save_profile(self.ftp_active, cfg)
+                return
             config.save_config(cfg)   # 可选：自动保存到文件
     # ---- 【D-1】来源列表的三个动作：追加 / 删除 / 选中写回 ----
     def _add_source(self, path):
@@ -1131,6 +1137,12 @@ class TransferForm(object):
         i = sel[0]
         if 0 <= i < len(self.source_list):
             del self.source_list[i]
+        if not self.source_list:
+            # 列表删空了，`source_path` 必须一起清 —— 否则界面上一项都看不到，
+            # 点「开始」却仍会拿这个残留值当"单源兜底"传出去。
+            self.source_path.set("")
+            self._refresh_source_listbox()
+            return
         # 删完把选中落到**原来那一项的位置**上（越界则落到最后一项），
         # 免得每删一个光标就跳回顶部 —— 连着删几个的时候很烦。
         self._refresh_source_listbox(select=min(i, len(self.source_list) - 1))
