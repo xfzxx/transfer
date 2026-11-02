@@ -1,0 +1,27 @@
+# transfer 依赖清单
+#
+# 基准环境：Windows / Python 3.12.4
+# 版本号取自 2026-11-03 实际可用的开发环境（D:\AI\env\python），按实测固定，
+# 避免半年后 pip 拉到大版本把界面画崩。
+#
+# 安装：pip install -r requirements.txt
+# 注：tkinter / sqlite3 / ftplib / threading 等全部来自标准库，不在本文件列。
+
+# ============ 运行必需 ============
+
+# Tk 界面皮肤，所有 UI 模块直接 import
+ttkbootstrap==1.20.4
+
+# ttkbootstrap 的进度条 / 单选框 / 复选框是它在内存里现画的，靠 Pillow 实现。
+# 少装它界面会报错（exe 体积也因此多了约 7.7 MB）。
+# _checks/ 下的截图探针也用到它的 ImageGrab，但那是测试用的，不是本项理由。
+Pillow==12.2.0
+
+# C3 档（WebView2 窗口壳）必需。web_app.py 里是懒导入，缺失时按设计抛 ImportError
+# 响亮失败——不会静默退回 C4 浏览器档。
+pywebview==6.2.1
+
+# ============ 构建 exe 需要（运行不需要）============
+
+# 打包必须用它自带的 文件传输工具.spec，不能手敲 pyinstaller -F
+pyinstaller==6.20.0
