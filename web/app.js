@@ -805,6 +805,7 @@ async function openPicker(mode) {
   const vars = (state && state.vars) || {};
   let initial = "";
   if (mode === "dest") initial = vars.dest_path || "";
+  else if (mode === "dest2") initial = vars.dest_path2 || "";
   else if (mode === "logdir") initial = vars.log_export_dir || "";
   else initial = vars.source_path || "";
   try {
@@ -832,6 +833,10 @@ async function openPicker(mode) {
 async function applyPicked(mode, path) {
   if (mode === "dest") {
     await invoke({ action: "set_var", target: "dest_path", value: path });
+  } else if (mode === "dest2") {
+    /* 第二目标与 Tk 档 `_browse_dest2` 同一条：写路径并顺手勾上「启用第二目标」。 */
+    await invoke({ action: "set_var", target: "dest_path2", value: path });
+    await invoke({ action: "set_var", target: "multi_dest", value: true });
   } else if (mode === "logdir") {
     await invoke({ action: "set_var", target: "log_export_dir", value: path });
   } else {

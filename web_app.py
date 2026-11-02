@@ -77,6 +77,7 @@ _PICK_TITLES = {
     "source-file": "选择文件",
     "source-dir": "选择文件夹",
     "dest": "选择目标文件夹",
+    "dest2": "选择第二个目标文件夹",
     "logdir": "选择日志默认导出目录",
 }
 
@@ -1060,8 +1061,18 @@ def _make_handler(bridge):
             self.end_headers()
             self.wfile.write(body)
 
+        _MAX_BODY = 8 * 1024 * 1024
+
         def _read_json(self):
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            # 负数会让 rfile.read 一直读到对端关连接（keep-alive 下等于挂死这条请求线程）；
+            # 超大值则是一次性分配。两种都按坏请求处理，并让本条连接到此为止。
+            if n < 0 or n > self._MAX_BODY:
+                self.close_connection = True
+                raise ValueError("请求体大小不合法：%r" % (n,))
             raw = self.rfile.read(n) if n else b""
             if not raw:
                 return {}
@@ -1219,8 +1230,12 @@ def _make_handler(bridge):
 
         def _serve_static(self, rel):
             rel = rel.replace("\\", "/").lstrip("/")
-            full = os.path.normpath(os.path.join(WEB_DIR, rel))
-            if not full.startswith(os.path.normpath(WEB_DIR)) or not os.path.isfile(full):
+            root = os.path.normpath(WEB_DIR)
+            full = os.path.normpath(os.path.join(root, rel))
+            # 前缀比较必须带分隔符：`...\transfer\web` 也会匹配 `...\transfer\web_app.py`，
+            # 于是 `/static/../web_app.py` 能把后端源码读出去。
+            root_cmp = os.path.normcase(root) + os.sep
+            if not os.path.normcase(full).startswith(root_cmp) or not os.path.isfile(full):
                 return self._send(404, json.dumps({"error": "not found"}))
             ctype = {
                 ".html": "text/html; charset=utf-8",
@@ -1497,8 +1512,18 @@ def main(argv=None):
             mode = "c4"
             explicit = True
         elif a == "--port":
+            if i + 1 >= len(argv):
+                print("--port 缺少端口号", file=sys.stderr)
+                return 2
+            try:
+                port = int(argv[i + 1])
+            except ValueError:
+                print("--port 需要 1-65535 的整数：%r" % (argv[i + 1],), file=sys.stderr)
+                return 2
+            if not (1 <= port <= 65535):
+                print("--port 需要 1-65535 的整数：%r" % (port,), file=sys.stderr)
+                return 2
             i += 1
-            port = int(argv[i])
             explicit = True
         elif a in ("--no-browser",):
             no_browser = True
