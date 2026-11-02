@@ -1909,8 +1909,9 @@ class TransferCore(object):
             # 与 retry 按钮。在这里再做一遍的后果是**存两份清单、打两行"已保存"**。
             log_path = self._save_failed_list(failed)
             self._last_failed = failed
-            self._ui._update_log("[源 %d/%d] 失败清单已保存：%s"
-                             % (self._src_index, total, log_path))
+            if log_path:
+                self._ui._update_log("[源 %d/%d] 失败清单已保存：%s"
+                                 % (self._src_index, total, log_path))
         elif not is_last:
             self._last_failed = []
 
@@ -2215,6 +2216,14 @@ class TransferCore(object):
                 f"重新开始会从断点续传。")
             self._transfer_finished()
             return
+        # 【修复】用户点「停止」也走 kind="done"（FTP 路径），原先落进下面的
+        # 正常完成分支 ⇒ 明明停了却弹「完成」。与 `_transfer_done_stream` 的
+        # stopped 分支保持同一口径。
+        if end_reason == "stopped":
+            self._ui._update_log(f"传输已停止，共处理 {self._completed} 个文件")
+            messagebox.showinfo("已停止", f"传输已停止，共处理 {self._completed} 个文件")
+            self._transfer_finished()
+            return
         if log_summary:          # 多源序列的最后一个源压掉这一句（弹窗照旧）
             self._ui._update_log(f"传输完成，共处理 {self._completed} 个文件")
         messagebox.showinfo("完成", f"传输完成，共处理 {self._completed} 个文件")
@@ -2231,10 +2240,24 @@ class TransferCore(object):
             except NameError:
                 base_dir = os.getcwd()
         log_path = os.path.join(base_dir, f"transfer_failed_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-        with open(log_path, 'w', encoding='utf-8') as f:
-            for src_path, target_path, err in failed:
-                f.write(f"{src_path}\t{target_path}\t{err}\n")
-        return log_path
+        # 【写盘失败不许打断终态】原先 `open` 一抛异常，调用方后面的
+        # `_transfer_finished()` 就永远到不了 —— 按钮卡在禁用、失败明细还压在
+        # 内存里、用户看不到任何提示。清单只是诊断产物，写不进去就如实说一句，
+        # 该收的尾照样收。临时名 + replace：半截文件不会冒充"已保存的清单"。
+        tmp = log_path + ".tmp"
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                for src_path, target_path, err in failed:
+                    f.write(f"{src_path}\t{target_path}\t{err}\n")
+            os.replace(tmp, log_path)
+            return log_path
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            self._ui._update_log(f"失败清单保存失败：{e}")
+            return None
 
 
     # 【阶段2a-修改原因】签名从"传失败清单"改为"传失败数量"（补充 A）：
@@ -2259,7 +2282,8 @@ class TransferCore(object):
             if failed:
                 log_path = self._save_failed_list(failed)
                 self._last_failed = failed
-                self._ui._update_log(f"失败清单已保存: {log_path}")
+                if log_path:
+                    self._ui._update_log(f"失败清单已保存: {log_path}")
                 self.retry_btn.configure(state="normal")
             else:
                 self._last_failed = []
@@ -2280,11 +2304,14 @@ class TransferCore(object):
             log_path = self._save_failed_list(failed)
             self._last_failed = failed
             self._ui._update_log(f"传输结束：成功复制 {self._completed - self._skipped} 个，跳过 {self._skipped} 个，失败 {failed_count} 个（遍历 {folder_count} 个文件夹）")
-            self._ui._update_log(f"失败清单已保存: {log_path}")
+            where = (f"失败清单已保存到:\n{log_path}" if log_path
+                     else "失败清单保存失败（目标目录不可写或磁盘已满）")
+            if log_path:
+                self._ui._update_log(f"失败清单已保存: {log_path}")
             self.retry_btn.configure(state="normal")
             messagebox.showwarning("部分完成",
                 f"复制完成：成功 {self._completed - self._skipped} 个，跳过 {self._skipped} 个，失败 {failed_count} 个。\n"
-                f"失败清单已保存到:\n{log_path}\n\n可点\"重传失败\"按钮重新尝试。")
+                f"{where}\n\n可点\"重传失败\"按钮重新尝试。")
         elif matched == 0:
             self._ui._update_log("没有符合过滤条件的文件")
             self._last_failed = []
@@ -2481,10 +2508,14 @@ class TransferCore(object):
             return
         if still_failed_count:
             log_path = self._save_failed_list(still_failed)
-            self._ui._update_log(f"重传结束：成功 {retried_ok} 个，仍失败 {still_failed_count} 个，清单已更新: {log_path}")
+            where = (f"清单已更新: {log_path}" if log_path
+                     else "清单保存失败（目标目录不可写或磁盘已满）")
+            self._ui._update_log(f"重传结束：成功 {retried_ok} 个，仍失败 {still_failed_count} 个，{where}")
             self.retry_btn.configure(state="normal")
             messagebox.showwarning("部分完成",
-                f"重传：成功 {retried_ok} 个，仍失败 {still_failed_count} 个。\n更新后的失败清单:\n{log_path}")
+                f"重传：成功 {retried_ok} 个，仍失败 {still_failed_count} 个。\n更新后的失败清单:\n{log_path}" if log_path
+                else f"重传：成功 {retried_ok} 个，仍失败 {still_failed_count} 个。\n"
+                     f"清单保存失败（目标目录不可写或磁盘已满）")
         else:
             self._ui._update_log(f"重传完成，{retried_ok} 个文件全部成功")
             self.retry_btn.configure(state="disabled")
