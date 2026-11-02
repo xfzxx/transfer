@@ -429,10 +429,18 @@ class TransferStateDB:
             row = conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if row is None:
+                # 【并发首建】两个无头进程可能同时打开一个全新库：两边都读到
+                # `row is None`，后插入的那个撞主键 —— 原先这条会以
+                # `IntegrityError` 冒到 `--run-task` 外面，退出码变成"崩溃"，
+                # 而实际上库已经由另一个进程建好了。这里只写"初始版本号"，
+                # 谁先写都一样 ⇒ `OR IGNORE` 后**重读**，再按真实值决定是否迁移。
                 conn.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
+                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
                     (str(config.DB_SCHEMA_VERSION),))
-                return 0
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if row is None or row[0] == str(config.DB_SCHEMA_VERSION):
+                    return 0
             dropped = 0
             # 上界就是版本总数：真有环（某个迁移函数没盖版本号）也会停在这里抛错，
             # 而不是转成死循环把界面冻住。
