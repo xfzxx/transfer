@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 
 
@@ -1066,25 +1067,33 @@ def _write_json_atomic(path, payload, **dump_kw):
     【失败仍然静默，但返回值要诚实】调用方的口径不变（记住设置是锦上添花，
     不该让一次写盘失败打断传输），但新增的「保存」按钮要能如实说出
     "已生效、但没写进文件" —— 所以这里返回布尔值，而不是继续 `pass`。
+
+    【临时文件名不再写死 `path + ".tmp"`】同一份文件被两个进程（例如
+    定时任务与界面）同时保存时，固定名字会让两边写进**同一个**临时文件：
+    交错的内容 + 后一个 `os.replace` 抢走前一个的结果，最坏是把两份配置
+    的字节混在一起。`mkstemp` 每次给唯一名字，谁替换谁都不会踩到对方。
     """
-    tmp = path + ".tmp"
+    tmp = None
     try:
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        with open(tmp, 'w', encoding='utf-8') as f:
+        d = os.path.dirname(path) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=os.path.basename(path) + ".", suffix=".tmp", dir=d)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(payload, f, indent=2, **dump_kw)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        tmp = None
         return True
     except Exception:
         # 失败时别把半截临时文件留在目录里（下一次写会覆盖它，但用户会看见一个
         # 莫名其妙的 `.tmp`）。删不掉也不上抛 —— 口径与本文开头一致。
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         return False
 
 
