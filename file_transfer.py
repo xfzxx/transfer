@@ -614,9 +614,23 @@ class FileTransferApp:
         if str(self.start_btn["state"]) == "disabled":
             if messagebox.askokcancel("退出", "传输正在进行，关闭窗口将中断任务并留下不完整文件。\n确定退出吗？"):
                 self._core._abort_current_task("user_abort")
+                self._save_ux_on_close()
                 self.root.destroy()
         else:
+            self._save_ux_on_close()
             self.root.destroy()
+
+    def _save_ux_on_close(self):
+        """退出前把界面设置落盘（与「开始传输」走同一条 `_collect_ux_state`）。
+
+        原先只有 `_launch_source` 会保存，于是"改完设置直接关窗"的下次启动
+        全部回到默认值 —— 而注释一直写着"落盘统一走关闭窗口时"。
+        保存失败不阻止退出（`save_ux_state` 自己吞异常，这里只防采集期异常）。
+        """
+        try:
+            config.save_ux_state(self._boot._collect_ux_state())
+        except Exception:                       # noqa: BLE001 — 退出路径不许被保存拖住
+            pass
 
     # ==================== 功能C1：控件换肤（ttkbootstrap） ====================
     # 【这一节改了什么、没改什么 —— 判据是硬约束 9】
