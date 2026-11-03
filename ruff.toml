@@ -1,0 +1,34 @@
+# ruff 配置 —— 2026-11-03 引入
+#
+# 定位：只拦**会变成 bug 的东西**，不做格式审查。
+# 本项目注释密度极高（601 行 E501 几乎全是说明文字），格式类规则一律关掉。
+
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "B", "S"]
+
+ignore = [
+    "E501",   # 长行：注释与判据说明本来就是长句，压缩反而丢信息
+    "S101",   # assert：判据脚本用 assert 是本职，生产代码的 assert 已知且接受
+    "S110",   # try-except-pass：多数是「失败不影响主流程」，逐个审过，保留原意
+    "S321",   # ftplib 明文：这就是本项目的传输协议（FTP 路线已裁定不改 SFTP）
+    "S324",   # md5：用于目标路径指纹（_resume_ctx_path），不是安全用途
+    "S310",   # urlopen：目标固定为 http://127.0.0.1:<int port>
+    "S314",   # ElementTree：解析本机 schtasks 导出的 XML，不是外部输入
+    "S603",   # subprocess：argv 列表 + shell=False，无注入面
+    "S608",   # SQL 拼接：表名走 PURGE_TABLES 白名单 + 常量列名，用户数据全参数化
+    "B010",   # setattr(obj, "固定名", v)：web_kit.install() 就在干这件事，是它的本职
+    "B007",   # 循环变量只用来计数：`for i in range(n)` 后只在循环外用 i 的合法写法
+    "E701",   # `if x: return` 单行写法，本项目既有风格，两千行里只有 5 处
+    "W293",   # 空白行带空格：纯空白噪声，不值得单独一次提交去改
+]
+
+[lint.per-file-ignores]
+# ⚠️ 这 31 条 import 看着「未使用」，其实**全是副作用导入**，一条都不能删：
+#   web_app.build() 的第一步就是 `import file_transfer`，靠它把 ui_dialogs /
+#   transfer_form / sched_tab / transfer_core … 全部拉进 sys.modules；
+#   web_kit.install() 随后才有这些模块的命名空间可打替身补丁。
+#   删掉任何一条，--c3 / --c4 直接不成立（且 --tk 档照样能跑，属静默失效）。
+"file_transfer.py" = ["F401"]

@@ -455,6 +455,10 @@ CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 -- 不加这条索引，跨源覆盖审计会退化成全表扫描 —— 而它在"目标已存在且大小/mtime 全同"
 -- 那一档每次都要跑一次（见 file_transfer._audit_overwrite）。
 CREATE INDEX IF NOT EXISTS idx_files_dst    ON files(dst_path);
+-- 【2026-11-03 新增】P1 预取（`state_db.load_skip_states`）的取数是 `WHERE src_root=?`。
+-- 没有这条索引它就是**全表扫** —— 20 万行的库里，每个源都要把整张表读一遍。
+-- 加索引不动任何数据、不改列、不改主键，老库下次启动 `executescript` 就会自动补上。
+CREATE INDEX IF NOT EXISTS idx_files_src_root ON files(src_root);
 
 -- 【D-1】加两列：谁覆盖的 / 被覆盖的那份原来属于谁。
 -- 列名跟本表既有的 old_/new_ 前缀（old_size/old_mtime/new_size/new_mtime）**保持一致** ——
@@ -1047,7 +1051,7 @@ def load_last_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
+        except (OSError, ValueError):  # JSON 读失败：文件不可读 / 内容不是合法 JSON
             return None
     return None
 
@@ -1134,7 +1138,7 @@ def load_ux_state():
                 d = json.load(f)
             if isinstance(d, dict):
                 return d
-        except:
+        except (OSError, ValueError):  # UX 状态读失败同上
             return None
     return None
 
@@ -1217,7 +1221,7 @@ def load_profiles():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             d = json.load(f)
-    except:
+    except (OSError, ValueError):  # 配置读失败同上
         return [], ""
     if not isinstance(d, dict):
         return [], ""
@@ -1455,7 +1459,7 @@ def load_schedules():
     try:
         with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f:
             d = json.load(f)
-    except:
+    except (OSError, ValueError):  # 定时任务表读失败同上
         return []
     if not isinstance(d, dict):
         return []

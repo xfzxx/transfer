@@ -183,7 +183,7 @@ def _sched_last_text(rec):
         when, st, c.get("copied", "?"), c.get("skipped", "?"), c.get("failed", "?"))
 
 def _schtasks_query_target(name):
-    """查一条任务**当前指向哪个可执行文件**。返回 `(state, text)`。
+    r"""查一条任务**当前指向哪个可执行文件**。返回 `(state, text)`。
 
     `state` 三档：
       * `"ok"`      —— 查到了，`text` 是 XML 里的 `<Command>` 值；

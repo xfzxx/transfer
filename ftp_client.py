@@ -82,7 +82,7 @@ class FTPHelper:
         # 启用 UTF-8 支持以处理中文文件名
         try:
             self.ftp.voidcmd('OPTS UTF8 ON')
-        except:
+        except Exception:  # 可选能力：服务器不认 OPTS UTF8 属正常
             pass
         if hasattr(self.ftp, 'encoding'):
             self.ftp.encoding = 'utf-8'

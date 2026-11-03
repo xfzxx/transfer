@@ -26,10 +26,14 @@
  *   · 通知类（info/warning/error）：每条新出现的弹一次 toast。
  */
 
-const POLL_MS = 500;
+/* 轮询改成 SSE 之后，这里只是**兜底通道**的节奏（见 startEventStream）。
+ * SSE 正常时一帧都不发；只有 EventSource 没建立/断了才按这个间隔补。 */
+const POLL_MS = 5000;
 let state = null;
 let logClearedTo = 0;
 let dialogShownId = 0;
+let tickInFlight = false;
+let eventSource = null;
 const seenNotices = new Set();
 const picker = { mode: "dest", path: "" };
 
@@ -1281,13 +1285,54 @@ async function browseSource() {
 /* ---------------- 主循环 ---------------- */
 
 async function tick() {
+  /* 单飞：上一轮还没回来就不再发一轮。
+   * 这一行是「进度条倒退」的根治点 —— setInterval 不管上一轮的生死，
+   * 主线程忙的时候请求会排队，乱序返回的旧快照会盖掉新的。 */
+  if (tickInFlight) return;
+  tickInFlight = true;
   try {
     state = await apiState();
     setConn(true);
     render();
   } catch (e) {
     setConn(false);
+  } finally {
+    tickInFlight = false;
   }
+}
+
+/* ---------------- 状态推送（SSE） ----------------
+ *
+ * 早先是 setInterval(tick, 500)。两个毛病：请求会叠加（上一轮没回来照样发下一轮）、
+ * 响应会乱序（旧快照后到，把新的盖掉 ⇒ 进度条倒退、按钮闪回）。
+ * 现在改成后端一条 /api/events 长连接，变了才推一帧，严格有序。
+ *
+ * 兜底：浏览器不支持 EventSource、或者这条连接没建立起来时，退回 5 秒一次的
+ * 慢轮询（够用，且不会再叠加 —— tick 里有单飞）。EventSource 自己带重连，
+ * 断了不用我们管，readyState 会在 CONNECTING/CLOSED 之间跳，那期间由兜底补。
+ */
+function startEventStream() {
+  if (typeof EventSource !== "function") return false;
+  try {
+    eventSource = new EventSource("/api/events");
+  } catch (e) {
+    eventSource = null;
+    return false;
+  }
+  eventSource.onmessage = (ev) => {
+    try {
+      state = JSON.parse(ev.data);
+      setConn(true);
+      render();
+    } catch (e) {
+      /* 坏帧就丢掉，下一帧会补一份完整的 */
+    }
+  };
+  eventSource.onerror = () => {
+    /* 交给 EventSource 自动重连；只有它彻底关掉时才让兜底轮询接手 */
+    if (eventSource && eventSource.readyState === 2) setConn(false);
+  };
+  return true;
 }
 
 /* ---------------- 页面存活报到 ----------------
@@ -1347,7 +1392,11 @@ function main() {
     }
   });
   tick();
-  setInterval(tick, POLL_MS);
+  startEventStream();
+  /* 兜底：SSE 没连上（或断在中途）才补一次轮询。readyState !== 1 即 OPEN。 */
+  setInterval(() => {
+    if (!eventSource || eventSource.readyState !== 1) tick();
+  }, POLL_MS);
 }
 
 document.addEventListener("DOMContentLoaded", main);

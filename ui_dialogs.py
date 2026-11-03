@@ -133,7 +133,7 @@ class FTPSettingsDialog(tk.Toplevel):
             return None
         try:
             port = int(self.port_entry.get().strip())
-        except:
+        except (TypeError, ValueError):  # 端口输入必须是整数
             messagebox.showwarning("警告", "端口必须是数字")
             return None
         user = self.user_entry.get().strip()
@@ -159,7 +159,7 @@ class FTPSettingsDialog(tk.Toplevel):
             # 启用 UTF-8
             try:
                 ftp.voidcmd('OPTS UTF8 ON')
-            except:
+            except Exception:  # 可选能力：OPTS UTF8
                 pass
             if hasattr(ftp, 'encoding'):
                 ftp.encoding = 'utf-8'
@@ -396,7 +396,7 @@ class FTPBrowserDialog(tk.Toplevel):
         if self.ftp:
             try:
                 self.ftp.quit()
-            except:
+            except Exception:  # 关闭旧连接，失败无所谓
                 pass
         try:
             self.ftp = ftplib.FTP()
@@ -405,7 +405,7 @@ class FTPBrowserDialog(tk.Toplevel):
             # 启用 UTF-8
             try:
                 self.ftp.voidcmd('OPTS UTF8 ON')
-            except:
+            except Exception:  # 可选能力：OPTS UTF8
                 pass
             if hasattr(self.ftp, 'encoding'):
                 self.ftp.encoding = 'utf-8'

@@ -1,0 +1,18 @@
+# pre-commit 配置 —— 2026-11-03 引入
+#
+# 用法（一次性）：
+#   pip install pre-commit
+#   pre-commit install
+#
+# 之后每次 git commit 会自动跑 ruff，只检查**改动的文件**，秒级返回。
+# 想全量手动跑：pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff
+        name: ruff（只拦 bug 类规则，见 ruff.toml）
+        args: [--fix, --exit-non-zero-on-fix]
+      # 刻意不开 ruff-format：它会把 2 万行的注释排版全部重排，
+      # 制造一个无法 review 的巨型 diff。要开另起一次专门提交。

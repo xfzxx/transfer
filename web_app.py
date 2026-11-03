@@ -918,7 +918,7 @@ class WebBridge(object):
                     except OSError:
                         continue
         except OSError as e:
-            raise ValueError("打不开目录：%s" % e)
+            raise ValueError("打不开目录：%s" % e) from e
         dirs.sort(key=str.lower)
         files.sort(key=str.lower)
         parent = os.path.dirname(path.rstrip("\\/"))
@@ -1045,6 +1045,12 @@ class _HandlerMarker(object):
     """占位，避免误用（真正的 Handler 在 `_make_handler` 里按桥生成）。"""
 
 
+# SSE 推送节奏（见 Handler._serve_events）
+_SSE_INTERVAL = 0.3      # 后端自查快照的间隔；有变化才真的发帧
+_SSE_PING_S = 15.0       # 没变化时的注释心跳，防止中间层判死
+_SSE_DEAD_ROUNDS = 30    # 连续这么多轮投递不上主线程 ⇒ 认为宿主已停，结束连接
+
+
 def _make_handler(bridge):
     from http.server import BaseHTTPRequestHandler
 
@@ -1138,6 +1144,8 @@ def _make_handler(bridge):
             if path == "/api/ping":
                 # 第二个实例 / 探活脚本用；**不走主线程**（见 `WebBridge.ping`）。
                 return self._send(200, json.dumps(bridge.ping(), ensure_ascii=False))
+            if path == "/api/events":
+                return self._serve_events()
             if path == "/api/diagnostics.zip":
                 try:
                     name, blob = bridge.diagnostics()
@@ -1230,6 +1238,66 @@ def _make_handler(bridge):
             except Exception as e:                      # noqa: BLE001
                 return self._send(200, json.dumps({"ok": False, "error": str(e)},
                                                   ensure_ascii=False))
+
+        def _serve_events(self):
+            r"""SSE 推送（`GET /api/events`）：一条连接，快照变了就推一帧。
+
+            【为什么要有这条】原来是前端每 500 ms 发一次 `GET /api/state`，有两个
+            治不好的毛病：
+
+              ① **请求会叠加**。`setInterval` 不管上一轮回没回来。主线程忙的时候
+                 （扫大目录 / 传大文件 / 原生对话框开着）一轮超过 500 ms，请求就排队；
+              ② **响应会乱序**。排队的请求各自返回，旧的快照可能后到，
+                 把新的那份盖掉 —— 界面上表现为**进度条倒退、按钮状态闪回**。
+
+            改成 SSE 之后，一条连接、一个方向、严格有序，上面两条同时消失；
+            顺带把「一次轮询一个 TCP 连接」变成「一次 SSE 一个长连接」。
+
+            【线程纪律】本方法跑在**请求线程**里（每个连接一条）。`bridge.snapshot()`
+            自己会 `call_on_main` 投递到主线程，所以这里不碰任何界面对象。
+            主循环没在跑时它抛 `TimeoutError` —— 连续几次就收工，不空转。
+
+            【心跳】没变化时每 `_SSE_PING_S` 秒发一个注释行（`: ping`）。不发的话
+            中间层（代理 / 浏览器）会以为连接死了；而每帧都发又会把带宽吃满。
+            """
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+            last = None
+            last_ping = time.time()
+            dead_rounds = 0
+            try:
+                while True:
+                    body = None
+                    try:
+                        body = json.dumps(bridge.snapshot(), ensure_ascii=False)
+                        dead_rounds = 0
+                    except TimeoutError:
+                        # 主线程正忙（比如原生文件对话框开着）：这一轮跳过，
+                        # 但连续多轮都忙说明宿主没了，收工。
+                        dead_rounds += 1
+                        if dead_rounds >= _SSE_DEAD_ROUNDS:
+                            break
+                    except Exception:                    # noqa: BLE001
+                        break
+                    if body is not None and body != last:
+                        last = body
+                        self.wfile.write(("data: %s\n\n" % body).encode("utf-8"))
+                        self.wfile.flush()
+                        last_ping = time.time()
+                    elif time.time() - last_ping >= _SSE_PING_S:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        last_ping = time.time()
+                    time.sleep(_SSE_INTERVAL)
+            except (BrokenPipeError, ConnectionResetError):
+                return                                   # 页面关了 / 刷新了，正常
+            except OSError:
+                return
 
         def _serve_static(self, rel):
             rel = rel.replace("\\", "/").lstrip("/")

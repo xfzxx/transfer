@@ -964,7 +964,7 @@ class TransferForm(object):
         try:
             port = int(str(fields.get("port")).strip())
         except (TypeError, ValueError):
-            raise ValueError("端口必须是数字")
+            raise ValueError("端口必须是数字") from None
         remote_dir = (fields.get("remote_dir") or "").strip()
         if not remote_dir.startswith("/"):
             remote_dir = "/" + remote_dir
@@ -1088,7 +1088,7 @@ class TransferForm(object):
                 after_host = current_path.split("/", 3)[-1]
                 if after_host:
                     initial = "/" + after_host
-            except:
+            except Exception:  # 解析 ftp:// 初值，失败就沿用默认目录
                 pass
 
         dlg = ui_dialogs.FTPBrowserDialog(self.root, cfg, select_mode="dir", initial_dir=initial)

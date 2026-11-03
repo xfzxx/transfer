@@ -41,6 +41,18 @@ import time
 
 import config
 
+# 【2026-11-03 加固】**判重记录的列序只写一次**。
+#
+# 原来 `get_file_state` 里 SELECT 的列名和 `keys` 元组是**两份手写清单**，
+# 靠"看着一样"保持一致。这正是本模块最怕的那类静默错位：把 SELECT 里两项换个位置，
+# 或者加一列忘了同步 keys，症状是"拿 dst_path 去比 src_size"⇒ 全部不跳过 ⇒ 每次
+# 全量重传，而库、SQL、返回值看上去全都正常，没有任何地方报错。
+# 现在两处都从这一个元组派生，且 `zip(..., strict=True)` 兜住长度不一致。
+_FILE_STATE_COLS = ("filename", "task_id", "src_path", "src_size", "src_mtime",
+                    "mtime_precision", "dst_path", "dst_size", "status",
+                    "src_deleted", "attempts", "last_error")
+_FILE_STATE_COLS_SQL = ", ".join(_FILE_STATE_COLS)
+
 # 【连接复用-新增】每线程一条**读**连接。用 threading.local 而不是全局字典，是因为
 # `threading.local()` 的语义就是"每个线程看到自己那一份" —— 这一步**正是本类第一条
 # 约定所要求的**（见文件头"线程模型"）：sqlite3 连接**跨线程用会踩限制**，不能共享。
@@ -780,16 +792,11 @@ class TransferStateDB:
     def get_file_state(self, src_path):
         with self._read() as conn:
             row = conn.execute(
-                "SELECT filename, task_id, src_path, src_size, src_mtime, "
-                "mtime_precision, dst_path, dst_size, status, src_deleted, "
-                "attempts, last_error FROM files WHERE src_path=?",
+                "SELECT " + _FILE_STATE_COLS_SQL + " FROM files WHERE src_path=?",
                 (src_path,)).fetchone()
             if row is None:
                 return None
-            keys = ("filename", "task_id", "src_path", "src_size", "src_mtime",
-                    "mtime_precision", "dst_path", "dst_size", "status",
-                    "src_deleted", "attempts", "last_error")
-            return dict(zip(keys, row))
+            return dict(zip(_FILE_STATE_COLS, row, strict=True))
 
     # 【P1 新增】把**该 src_root 的全部判重记录**一次读进内存。
     #

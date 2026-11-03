@@ -192,7 +192,7 @@ class VarStub(object):
     def set(self, value):
         new = self._coerce(value)
         with self._lock:
-            old = self._value
+            _old = self._value
             self._value = new
             traces = list(self._traces)
         # trace 回调在**锁外**触发：Tk 里回调函数体不能反过来再拿这把锁时死锁。

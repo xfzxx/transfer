@@ -1393,7 +1393,7 @@ class TransferCore(object):
             except OSError as e:
                 # Windows ERROR_DISK_FULL(112) 映射为 ENOSPC
                 if e.errno == errno.ENOSPC or getattr(e, 'winerror', None) == 112:
-                    raise DiskFullError(f"目标磁盘空间不足：{dst}")
+                    raise DiskFullError(f"目标磁盘空间不足：{dst}") from e
                 if i < attempts - 1:
                     time.sleep(config.RETRY_BACKOFF_S[min(i, len(config.RETRY_BACKOFF_S) - 1)])
                     continue
