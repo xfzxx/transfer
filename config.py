@@ -1810,25 +1810,36 @@ SPEED_ETA_MIN_S = 10.0
 #   方向是单向的；把 UI 库拖进常量模块会把这条边反过来。
 #   与 SPEED_* 一样：**本模块不认识这个字符串的含义**，怎么用是界面层的事。
 
-C_UI_THEME = "cosmo"
-# 界面主题名。**当前用的是 ttkbootstrap 1.20.4 的主题名空间。**
+C_UI_THEME = "bootstrap-light"
+# 界面主题名。**当前用的是 ttkbootstrap 2.2.6 的主题名空间。**
 #
-# 【⚠️ 一条踩过的坑，写在这里免得下次再踩】
-#   ttkbootstrap **2.x 把主题名换掉了**。`litera` / `cosmo` / `flatly` / `journal` …
-#   这一批是 **1.x**（照着 Bootstrap 4/5 命名）的；2.x 只有
-#   bootstrap-light / sandstone / catppuccin / nord / tokyo-night 那一批，
-#   **`litera` 和 `cosmo` 在 2.2.3 里根本不存在**（实测 `theme_names()` 里没有）。
-#   `pip index versions ttkbootstrap` 同时给得出 1.20.4 和 2.2.3 —— 所以选版本
-#   **等于**选主题名空间。本项目钉在 **1.20.4**，理由：
-#     ① 用户点名要的就是 litera / cosmo；
-#     ② 1.20.4 是纯 Python，在 Python 3.12.4 上实测可用；
-#     ③ 换来换去只会让"哪个名字对应哪套配色"更难对。
-#   **升级 2.x 之前必须先改这个字符串**，否则启动时 `theme_use` 会抛
-#   `TclError: theme "cosmo" doesn't exist`。
+# 【2026-11-03 主题迁移：cosmo → bootstrap-light】
+#   迁移的起因不是想换皮，是依赖链被锁死了：
+#       Pillow 13.0.0（清掉全部 54 条 Dependabot 告警）
+#         ↑ 要求 ttkbootstrap >= 2.x（1.20.4 声明 pillow<13，pip 直接 ResolutionImpossible）
+#         ↑ 而 2.x 里没有 cosmo 这个名字
+#   2.x 的 `cosmo` 还能传，但只是"pre-2.0 遗留兼容名"（官方 DeprecationWarning：
+#   3.0 将移除），且实测配色根本不是原来那套 —— `TButton.background`
+#   从 #2780e3 变成 #f0f0f0（临床蓝变系统灰）。所以必须换一个真主题。
 #
-# 【为什么是 cosmo 而不是 litera】判据是用户给的"更像医疗软件"：
-#   cosmo 的主色 #2780e3 是标准的"临床蓝"，界面扁平、白色底、边框 #ced4da 很轻；
-#   litera 的主色 #4582ec 偏靛紫，secondary #adb5bd 更淡 —— 淡到那条灰色的
-#   线程数提示文字对比度不够。两者的**行高与字体完全相同**（主题不改基础字号，
-#   实测 `TkDefaultFont` 在两边都是 Microsoft YaHei UI 9pt），
-#   所以这是纯配色取舍，不影响下面那个尺寸盒子。
+# 【为什么选 bootstrap-light】判据仍是用户给的那条"更像医疗软件"，用色差量化：
+#   30 个 2.0 主题里，浅色且主色接近 #2780e3 的候选（实测 Style().colors）：
+#       one-light        #3360c2  底 #fafafa   色差 47.5（数值最近，但底偏灰）
+#       bootstrap-light  #0a58ca  底 #ffffff   色差 55.4  ← 选它
+#       solarized-light  #1e6fa8  底 #f6f1e9   色差 62.1（米黄底，医院场景慎用）
+#       tokyo-night-light #6282c6 底 #e1e2e7   色差 65.8
+#   bootstrap-light 是 Bootstrap 5 官方主色，白底 + 扁平 + 轻边框，
+#   观感最接近原来那套"扁平白底临床风"；`one-light` 的灰底会让整界面发灰。
+#
+# 【历史：为什么当初是 cosmo（1.x 时代）】用户点名"更像医疗软件"：
+#   cosmo 主色 #2780e3 是标准临床蓝，白色底、边框 #ced4da 很轻；
+#   litera 主色 #4582ec 偏靛紫，secondary #adb5bd 太淡（线程数提示文字对比度不够）。
+#   这段留在这里是因为**同一套判断标准**现在又用了一遍（见上面的色差表）。
+#
+# 【迁移代价：比预想小】界面里**没有一处硬编码颜色**，54 处全走 `bootstyle=` 语义名，
+#   所以换主题只改这一行。布局不靠人肉量：`tests/test_layout_budget.py` 会判
+#   `winfo_reqheight() <= 窗口高度`，实测 2.2.6 反而更宽松（需 696x673，窗口 888x717，
+#   1.20.4 时是 704x685）。C3/C4 两档外观在 `web/app.css`，**不经过主题**。
+#
+# ⚠️ 换主题/换版本前先跑 `pytest tests/test_layout_budget.py`：主题 = 字体 = 行高，
+#   这个项目历史上被"换肤把日志区挤扁"咬过两次（PROJECT_STATE §7.7 T4）。
