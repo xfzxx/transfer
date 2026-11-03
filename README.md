@@ -3,7 +3,8 @@
 本地硬盘 ↔ FTP 服务器之间批量传文件的 Windows 桌面工具。整个文件夹递归传，复制或移动，
 支持断点续传——几百 TB 传到一半断了，接着往下跑，不用从头再来。
 
-界面有 **Tk 档** 和 **Web 档** 两种，同一套传输核心，开机自检挑一档起来。
+三档壳，**同一套传输内核**：`--tk` 真 Tk 窗口 / `--c3` WebView2 窗口壳 / `--c4` 系统浏览器。
+不带参数时由 `host_probe` 自检挑一档（只会挑 C3 或 C4）。
 
 > 本文只是入口页。**使用者请读 [`README_FINAL.md`](README_FINAL.md)**（写给不懂编程的人），
 > **开发者请读 [`PROJECT_STATE.md`](PROJECT_STATE.md)**（319 KB，设计与踩坑全在里面）。
@@ -35,7 +36,8 @@
 
 ```bash
 pip install -r requirements.txt
-python web_app.py            # 默认：host_probe 自检选档
+python web_app.py --tk       # 纯 Tk 窗口：不装替身、不起浏览器，日常开发用这个
+python web_app.py            # 默认：host_probe 自检选档（C3 或 C4）
 python web_app.py --c4       # 强制 Web 档，用系统浏览器打开
 python web_app.py --c3       # 强制 Web 档，用 WebView2 窗口壳
 python web_app.py --port 8123 --no-browser   # 指定端口 / 不起浏览器
@@ -43,6 +45,24 @@ python web_app.py --port 8123 --no-browser   # 指定端口 / 不起浏览器
 
 显式给了参数就**不参与单实例互斥**，也不顺延端口——探针和并排调试要能同时开好几个。
 无头模式下由 Windows 计划任务调用 `--run-task <任务名>`，不弹窗。
+
+> `--tk` 是 `file_transfer.__main__` 那条老入口的等价物（同一个 `FileTransferApp`），
+> 但走 `web_app.py` 这个统一入口，省得两处入口各自演化。
+> 冻结在 2026-10-17 的纯 Tk 老代码留在分支 `tk-only`（标签 `v0.9-tk`），**只作存档、不再维护**。
+
+## 开发约定：改一处还是改三处
+
+| 你改的东西 | 处数 | 动哪里 |
+|---|---|---|
+| 传输逻辑 / 参数 / 状态 | 1 | `transfer_core` / `config` / `state_db` |
+| 装配逻辑（控件怎么连、点一下干什么） | 1 | `file_transfer` / `transfer_form`（三档共用） |
+| 纯外观（颜色 / 间距 / 字号） | 2 | ttkbootstrap 主题 ↔ `web/app.css` |
+| **新增一个控件或设置项** | **3** | ①Tk 装配 ②`web_host`/`web_kit` 补替身 ③`web/` 三件套 |
+| 新增一个对话框 | 2 | `ui_dialogs`（Tk）+ `web_app._dialog` |
+
+**铁律：新增控件时三处必须在同一个 commit 里改完。** 否则会出现「Tk 有、Web 没有」的半成品。
+先在 `--tk` 里看效果（启动快），再补 web 侧；替身缺实现会以 `NotImplementedError` 当场报错，
+不会拖到发布才暴露。
 
 ## 依赖
 
@@ -56,7 +76,7 @@ python web_app.py --port 8123 --no-browser   # 指定端口 / 不起浏览器
 
 | 文件 | 职责 |
 |---|---|
-| `web_app.py` | **打包入口**。HTTP 服务 + 三档宿主（自检 / C3 / C4） |
+| `web_app.py` | **打包入口**。三档壳：`--tk` 真窗口 / C3 / C4，外加 HTTP 服务与桥 |
 | `app_bootstrapper.py` | 启动装配、命令行参数、无头模式 |
 | `file_transfer.py` | 主窗口与交互 |
 | `transfer_core.py` | 传输核心：复制 / 移动 / 断点 / 失败清单 |

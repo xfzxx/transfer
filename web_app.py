@@ -9,11 +9,14 @@ r"""Web 宿主的**运行时**：装配（替身工具包 + 装配器）+ 双模
     web_host.py  替身层      —— `VarStub` / `WidgetStub` / `SchedulerStub`，以及
                              本运行时用的 `WebRoot`（`tk.Tk()` 的替身）。
     web_app.py   本文件      —— 装配序列（`file_transfer.FileTransferApp(root)`）
-                             与双模主循环：
+                             与三档壳：
+                               · `--tk`（真 Tk 窗口）：不装替身，直接 `tk.Tk()`，
+                                 见 `run_tk()`；
                                · C3（pywebview）：宿主事件循环（主线程）；
                                · C4（本地 HTTP + 系统浏览器）：HTTP 服务在后台线程，
                                  主线程泵 `SchedulerStub.run_pending()`。
-                             两模共用**同一份**前端与同一份桥（`WebBridge`）。
+                             C3/C4 共用**同一份**前端与同一份桥（`WebBridge`）；
+                             三档共用**同一份**传输内核与同一份装配序列。
 
 ================================================================================
 【线程纪律（照抄 `web_host.SchedulerStub` 的约定，不是新造的）】
@@ -1496,6 +1499,53 @@ def run_c3(bridge, port=DEFAULT_PORT, title=None, port_tries=1):
     return 0
 
 
+def run_tk():
+    r"""纯 Tk 档：真 `tkinter` 窗口，**一个替身都不装**。
+
+    【为什么要单独一条路，而不是复用 `build()`】
+    C3/C4 的 `build()` 第一件事就是 `web_kit.install()` —— 它把各界面模块命名空间里的
+    `tk` / `ttkbootstrap` 换成替身。替身造出来的是**界面模型**（可序列化），不是像素；
+    像素由 `web/` 那套前端去画。所以要让窗口真的出现在屏幕上，必须**跳过** install()，
+    让建造代码照旧拿到真 tkinter —— 这也是 `file_transfer.__main__` 走的同一条路。
+
+    【与 `file_transfer.__main__` 的差别】装配序列一步不差（同一个 `FileTransferApp`），
+    只差两处：
+      ① 不解析 `--run-task`：无头入口仍归 `file_transfer.__main__`，这里只有 GUI；
+      ② 补回开关耦合检查（见下）—— 那条检查原本只在 `__main__` 里，而 web_app 是
+         打包后的真实入口，缺了它等于这道保险对所有档都失效。
+    两处都是"补回来"，不是新逻辑。
+
+    【为什么不参与单实例互斥】与 `--c3` / `--c4` 同规则：显式参数用于探针与并排调试，
+    要能同时开好几个窗口（`main()` 里 `explicit=True` 已经保证）。
+    """
+    import tkinter as tk
+
+    import file_transfer
+
+    # 【开关耦合检查】`_STATE_DB_ENABLED=True` + `_ATOMIC_WRITE_ENABLED=False` 意味着
+    #   状态库记下了"这个文件已完成"，而磁盘上可能是写入中断的半截文件 —— 续传会
+    #   静默跳过它们，正是整个阶段 2 要消灭的静默数据丢失。开发者配置错误，必须
+    #   响亮失败。反向组合（库关、原子开）是安全的，放行。
+    #   文案与 `file_transfer.__main__` 里那道保持一致，两处都改才行。
+    if config._STATE_DB_ENABLED and not config._ATOMIC_WRITE_ENABLED:
+        msg = ("_STATE_DB_ENABLED = True 时，_ATOMIC_WRITE_ENABLED 必须为 True。\n\n"
+               "该组合会导致：状态库记录文件已完成，但磁盘上可能是写入中断的半截文件，\n"
+               "续传时会静默跳过这些损坏文件。\n\n"
+               "请把 _ATOMIC_WRITE_ENABLED 改回 True 后重启。")
+        sys.stderr.write("[tk] 配置错误：%s\n" % msg)
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("配置错误", msg)
+        root.destroy()
+        return 1
+
+    root = tk.Tk()
+    app = file_transfer.FileTransferApp(root)        # noqa: F841 — 由 root 的控件树持有
+    root.mainloop()
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     mode = None                       # None ⇒ 交给 `host_probe` 开机自检
@@ -1510,6 +1560,11 @@ def main(argv=None):
             explicit = True
         elif a in ("--c4",):
             mode = "c4"
+            explicit = True
+        elif a in ("--tk",):
+            # 纯 Tk 档：真窗口。**必须绕开 build()** —— 那条路会装替身，
+            # 造出来的只是界面模型，屏幕上不会出现任何窗口。见 `run_tk()`。
+            mode = "tk"
             explicit = True
         elif a == "--port":
             if i + 1 >= len(argv):
@@ -1544,6 +1599,11 @@ def main(argv=None):
                 _open_existing("http://127.0.0.1:%s/"
                                % (info.get("port") or port))
                 return 0
+
+    # 纯 Tk 档要先分走：`build()` 会 `web_kit.install()` 装替身，
+    # 一旦装了，`file_transfer` 里的 `tk.Tk()` 就不再是真窗口了。
+    if mode == "tk":
+        return run_tk()
 
     bridge = build()
     if mode is None:
