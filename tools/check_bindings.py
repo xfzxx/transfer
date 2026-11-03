@@ -60,12 +60,41 @@ def _read(path):
         return f.read()
 
 
+# 后端控件名 → 前端 DOM id 的**显式登记表**（只在两边故意不同名时用）
+#
+# 为什么需要它：`_semantic` / 控件名用的是下划线（`src_settings_btn`），
+# 而前端那两个 ⚙ 按钮的 id 是 `src-gear` / `dst-gear`（HTML 里 id 习惯用连字符）。
+# 名字对不上，机器就没法自动认出来，只能落到"WARN 可能缺失"里 —— 而它们**在**。
+# 与其让判据长期假红（会训练所有人无视红色），不如把这种"故意的不同名"登记下来：
+# 新按钮要么走 data-click（自动匹配），要么在这里登记一行。
+WIDGET_TO_DOM_ID = {
+    "src_settings_btn": "src-gear",
+    "dst_settings_btn": "dst-gear",
+}
+
+
 def html_bindings():
-    """→ (data-var 集合, data-click 集合)"""
+    """→ (data-var 集合, data-click 集合, id 集合)"""
     html = _read(HTML)
     var_names = set(re.findall(r'data-var="([A-Za-z0-9_]+)"', html))
     click_names = set(re.findall(r'data-click="([A-Za-z0-9_]+)"', html))
-    return var_names, click_names
+    ids = set(re.findall(r'id="([A-Za-z0-9_-]+)"', html))
+    return var_names, click_names, ids
+
+
+def js_bound_ids():
+    """被 JS 按 id 绑过事件的元素。
+
+    【为什么需要这条】`data-click` 不是唯一的绑定方式。实测 `#src-gear` / `#dst-gear`
+    两个 ⚙ 按钮走的是 `$("#src-gear").addEventListener("click", ...)` —— 它们**在**，
+    只是没有 data-click。只看 data-click 会把这它们误报成"Web 缺入口"。
+    宁可让判据多认一种绑定方式，也不要制造假红：一条会误报的检查，
+    训练的是所有人**无视红色**。
+    """
+    js = _read(JS)
+    ids = set(re.findall(
+        r"""\$\("#([A-Za-z0-9_-]+)"\)\s*\.\s*(?:addEventListener|onclick|on\()""", js))
+    return ids
 
 
 def js_bindings():
@@ -101,9 +130,15 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true", help="打印完整清单")
     args = ap.parse_args()
 
-    html_vars, html_clicks = html_bindings()
+    html_vars, html_clicks, html_ids = html_bindings()
     js_labels, js_actions = js_bindings()
     be_vars, be_widgets, be_actions, editable = backend_bindings()
+
+    # 「前端点得到」的两种形态：data-click 统一绑定，或 id + JS 自己绑。
+    reachable_clicks = set(html_clicks) | (html_ids & js_bound_ids())
+    # 名字故意不同名的那几个，按登记表折算成后端控件名
+    reachable_widgets = set(reachable_clicks) | {
+        w for w, dom in WIDGET_TO_DOM_ID.items() if dom in reachable_clicks}
 
     errors, warns = [], []
 
@@ -126,10 +161,11 @@ def main():
     for name in sorted(html_clicks - set(be_widgets)):
         err("③data-click", "HTML 绑定了按钮 `%s`，但后端没有这个控件" % name)
 
-    # ④ 后端登记的按钮 → HTML 得能点到（WARN，可能有意的 Tk-only 控件）
+    # ④ 后端登记的按钮 → 前端得点得到（data-click 或 id+JS 绑定都算；WARN）
     button_names = {n for n, k in be_widgets.items() if k in ("button", "ttkbutton")}
-    for name in sorted(button_names - html_clicks):
-        warn("④button", "后端有按钮 `%s`，HTML 里没有 data-click（若本就不该出现在 Web 档可忽略）" % name)
+    for name in sorted(button_names - reachable_widgets):
+        warn("④button", "后端有按钮 `%s`，前端既没有 data-click 也没有按 id 绑事件"
+                        "（若本就不该出现在 Web 档可忽略）" % name)
 
     # ⑤ 前端调的语义动作 → 后端必须能按名字找到落点
     for name in sorted(js_actions - be_actions):
