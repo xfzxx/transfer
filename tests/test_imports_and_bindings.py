@@ -28,8 +28,15 @@ def test_module_imports(name):
 
 def test_bindings_have_no_error():
     """前后端绑定零 ERROR：data-var / data-click / 语义动作 全部对得上。"""
+    # 【为什么要显式给 PYTHONIOENCODING】它在 CI 上真红过一次：Windows runner 的子进程
+    #   stdout 默认 cp1252，脚本里的中文 print 直接 UnicodeEncodeError —— 判据没毛病，
+    #   是"输出编码"把判据判死了。脚本自己已经 reconfigure，这里再上一道保险，
+    #   让"判据本身"与"跑判据的环境"彻底解耦。
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, os.path.join(ROOT, "tools", "check_bindings.py")],
-        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=180)
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=env, timeout=180)
     if proc.returncode != 0:
         pytest.fail("绑定检查有 ERROR：\n%s\n%s" % (proc.stdout, proc.stderr))

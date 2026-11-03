@@ -126,6 +126,18 @@ def backend_bindings():
 
 
 def main():
+    # 【2026-11-03 修】stdout 必须能写中文。
+    #   GitHub Actions 的 Windows runner 上，子进程 stdout 默认编码是 **cp1252**，
+    #   打一行「结果：ERROR 0 条」就抛 UnicodeEncodeError —— 于是判据本身红了，
+    #   而它要判的东西一行问题都没有（CI 首跑就是这么红的：37 passed / 1 failed）。
+    #   `errors="replace"` 是兜底：真遇到写不出去的字符也宁可显示成 `?`，
+    #   不能让"输出编码"这种与主题无关的事把判据判死。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                     # noqa: BLE001 —— 老环境/被接管的流
+            pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true", help="打印完整清单")
     args = ap.parse_args()
