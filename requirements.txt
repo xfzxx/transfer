@@ -54,7 +54,7 @@ ttkbootstrap==1.20.4
 #     · 加任何图片预览 / 缩略图 / 截图对比功能（含 `dicom-viewer` 那条线接进来）；
 #     · 换主题时把 ttkbootstrap 升到 2.x（那时 Pillow 一并升到 13.0.0，54 条全清）；
 #     · Pillow 出 12.3.x 以内的新修复版（能升就升，不占约束）。
-Pillow==12.3.0
+Pillow==13.0.0
 
 # C3 档（WebView2 窗口壳）必需。web_app.py 里是懒导入，缺失时按设计抛 ImportError
 # 响亮失败——不会静默退回 C4 浏览器档。
