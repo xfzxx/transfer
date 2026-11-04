@@ -812,6 +812,10 @@ class AppBootstrapper:
         # 不加锁（写的是 int/bool，GIL 下不会撕裂，最坏读到 500ms 前的值 ——
         # 对指示器完全够用）。按**源**归零，位置在两个 progress_marquee 投递点旁边。
         self._app._scan_dirs = [0]
+        # 【2026-11-04】扫描期**已发现**的累计量：`[文件数, 字节数]`。
+        #   与 `_scan_dirs` 同一套注入方式（宿主建、按引用传），扫描器原地改。
+        #   `ui_channel` 拿它渲染「已发现 N 个 / X GB」，`ftp_transfer` 负责累加。
+        self._app._scan_stat = [0, 0]
         # 【第 1 步-搬走】`_transfer_started` 已归 `_ui`（它是"速度该不该上屏"的判据，
         #   与速度同一族）。宿主侧改调 `self._ui._reset_transfer_started()`。
         #   `_scan_dirs` **留在宿主**：扫描器握着那个 list 对象，按引用注入给 `_ui`。
@@ -923,6 +927,7 @@ class AppBootstrapper:
             pause_event=self._app._pause_event,
             stop_event=self._app._stop_event,
             scan_dirs=self._app._scan_dirs,
+            scan_stat=self._app._scan_stat,
             source_path=self._app.source_path,
             dest_path=self._app.dest_path,
             flatten=self._app.flatten,
@@ -961,6 +966,7 @@ class AppBootstrapper:
             log_level=self._app.log_level,
             log_export_dir=self._app.log_export_dir,
             scan_dirs=self._app._scan_dirs,
+            scan_stat=self._app._scan_stat,
             handlers={
                 "done_stream": self._app._core._transfer_done_stream,
                 "done": self._app._core._transfer_done,

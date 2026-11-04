@@ -70,7 +70,7 @@ class UIChannel:
     【挂进来的 3 个控件】progress / log_text / speed_label。
     """
     def __init__(self, core, root, pause_event, log_level, log_export_dir,
-                 scan_dirs, handlers):
+                 scan_dirs, handlers, scan_stat=None):
         """构造。**注入的引用必须是宿主那一个实例**，不许各自 new 一份。
 
         `core` 只用来读三个数（`_completed` / `_total` / `_task_active`）：
@@ -83,6 +83,10 @@ class UIChannel:
         self.log_level = log_level             # 注入：同一个 Tk 变量
         self.log_export_dir = log_export_dir   # 注入：同一个 Tk 变量
         self._scan_dirs = scan_dirs            # 注入：同一个"一格列表"（扫描器握着它）
+        # 【2026-11-04】扫描期**已发现**的累计量：`[文件数, 字节数]`。
+        #   与 `_scan_dirs` 同款 —— 宿主建一个、按引用注入，扫描器原地改，这里只读。
+        #   `None` = 这条线没接（老调用方 / 单测直接构造通道）→ 文案退回老形态。
+        self._scan_stat = scan_stat if scan_stat is not None else [0, 0]
 
         # 控件由建造方挂进来（`attach_widgets`）—— 建集合之前先占位，
         # 免得"还没建到那一格就被读到"变成 AttributeError。
@@ -661,6 +665,18 @@ class UIChannel:
         #    只有"在动"以及动了多远。N 是**目录数**不是文件数 —— 空目录不产出文件，
         #    而 12 层的树上恰恰是"目录在往下走"最能说明没卡死。
         if self._progress_marquee and not self._transfer_started:
+            # 【2026-11-04】优先报"已发现多少个文件 / 多大" —— 用户关心的是规模，
+            # 而不是"扫了几个目录"（空目录也算一个，那个数字会虚高）。
+            # 一个文件都还没发现时才退回目录数：那时"N 个目录在动"是唯一能说的实话。
+            files, nbytes = self._scan_stat[0], self._scan_stat[1]
+            if files:
+                # 【为什么不是「扫描中… 已发现 …」】量过：那个前缀要 50px，
+                # 六位数下整串 213px 超预算；去掉前缀 163px。
+                # 而"正在扫"这件事**跑马灯已经在说了**（进度条在动），不必拿字数买它。
+                head = "已发现 %d 个" % files
+                if nbytes:
+                    head += " / " + self._fmt_size(nbytes)
+                return head
             return f"扫描中… 已扫 {self._scan_dirs[0]} 个目录"
         if not self._core._task_active:
             return ""                   # 没任务在跑（含刚启动、已完成）—— 留白
@@ -682,12 +698,32 @@ class UIChannel:
             #    "1023.9 MB/s · 已扫 999999 个目录 · 已传 999999 个文件"量出来 300+px，
             #    超出部分会被**静默裁掉**（不换行、不报错，用户看到半句话）。
             #    按裁定"装不下优先砍已扫 N 个目录"，这里只留文件数。
+            # 【为什么这里**不**拼体积】量过：`1023.9 MB/s · 已传 999999 个 / 999.9 GB`
+            #   是 235px，超定宽预算 209px —— 会被**静默裁掉**，用户看到半句话。
+            #   而这一档里"已传多少个"比"总量多大"更重要（总量在扫描档已经报过），
+            #   所以体积只放扫描档，这里保持原样。
             parts.append(f"已传 {self._core._completed} 个文件")
         else:
             eta = self._eta_text(now, speed)
             if eta:
                 parts.append(eta)
         return " · ".join(parts)
+
+    @staticmethod
+    def _fmt_size(nbytes):
+        """字节数 → "12.3 GB"。**不带 /s** —— 与 `_fmt_speed` 的区别就在这里，
+        别为了省一个函数把 "/s" 拼在速度串上再用切片去掉。
+
+        【为什么要它】扫描期的"已发现 X GB"要的是一个**存量**，不是速率。
+        宽度预算 209px 是量过的：`扫描中… 已发现 99999 个 / 999.9 GB` = 206px。
+        位数再多就会被定宽标签静默裁掉（这正是本项一开始要绕开的坑）。
+        """
+        n = float(nbytes or 0)
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return ("%d B" % n) if unit == "B" else ("%.1f %s" % (n, unit))
+            n /= 1024.0
+        return "%.1f TB" % n
 
     def _eta_text(self, now, speed):
         """ETA，或者 None（不显示）。

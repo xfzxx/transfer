@@ -37,13 +37,18 @@ class FtpTransfer(object):
     """FTP 那一路的 worker / 生产者 / 远端路径解析。装配见模块 docstring。"""
 
     def __init__(self, core, live, lock, pause_event, stop_event, scan_dirs,
-                 source_path, dest_path, flatten, thread_count, on_part_reclaim):
+                 source_path, dest_path, flatten, thread_count, on_part_reclaim,
+                 scan_stat=None):
         self._core = core
         self._live = live
         self._lock = lock
         self._pause_event = pause_event
         self._stop_event = stop_event
         self._scan_dirs = scan_dirs
+        # 【2026-11-04】`[已发现文件数, 已发现字节数]`。与 `_scan_dirs` 同一套：
+        #   宿主建一个、按引用传进来，扫描/派发路径原地累加，`ui_channel` 只读。
+        #   `None` = 没接线（老调用方 / 单测）→ 累加到一个私有盒子里，谁都不看。
+        self._scan_stat = scan_stat if scan_stat is not None else [0, 0]
         self.source_path = source_path
         self.dest_path = dest_path
         self.flatten = flatten
@@ -151,6 +156,8 @@ class FtpTransfer(object):
             # 跑马灯一亮，界面上说的就是"这个源正在扫"。
             # 原地改盒子，不重新绑定（生成器可能还握着旧引用）。
             self._scan_dirs[0] = 0
+            self._scan_stat[0] = 0          # 同上：原地改盒子，不重新绑定
+            self._scan_stat[1] = 0
             self._ui._reset_transfer_started()      # 【第 1 步】按源归零（FTP 两处）
             self._ui._post_ui("progress_marquee")
 
@@ -565,6 +572,11 @@ class FtpTransfer(object):
         handed_out = set()          # 见下方扁平化重名说明
         actual_stripped = (actual_remote_dir or '/').lstrip('/')
         for i, (remote_path, r_size, _r_raw, r_mtime, r_prec) in enumerate(files_stream, 1):
+            # 【2026-11-04】扫描期的"已发现 N 个 / X GB"就在这里累加 ——
+            #   远端大小是 LIST/MLSD 已经给出来的，**零额外代价**。
+            self._scan_stat[0] += 1
+            if r_size:
+                self._scan_stat[1] += int(r_size)
             remote_stripped = remote_path.lstrip('/')
             if remote_stripped.startswith(actual_stripped):
                 rel = remote_stripped[len(actual_stripped):].lstrip('/')
@@ -595,6 +607,14 @@ class FtpTransfer(object):
         由 FTPPooledConn._known_dirs 保证每个目录整条任务只 MKD 一次。
         【阶段4】入参同样是流（见 _ftp_download_producer）。"""
         for i, (full_path, rel_dir, fname) in enumerate(files_stream, 1):
+            # 【2026-11-04】同一条统计。本地清单里**没有 size**（`os.walk` 只给名字），
+            #   所以这里补一次 `getsize` —— 每个文件多一次 stat，相对一次上传的
+            #   网络往返可以忽略；换来的是扫描期就能看到"已发现多大"。
+            self._scan_stat[0] += 1
+            try:
+                self._scan_stat[1] += os.path.getsize(full_path)
+            except OSError:
+                pass                      # 拿不到大小不影响计数本身
             if flatten or rel_dir == ".":
                 remote_dir = remote_base
             else:
