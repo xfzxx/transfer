@@ -84,6 +84,12 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=_tb_datas + _web_datas + _pv_datas,
+    # 【2026-11-04 记一笔】`notify_win` 是函数内 import（`_notify_run_end` 里），
+    # 特意验证过 PyInstaller **能自动识别函数级 import**：不登记 hiddenimports 时
+    # `build\...\Analysis-00.toc` 里也能查到它（实测 1 条）。所以这里**不加**登记
+    # —— 保持 spec 少一处需要跟着代码改的地方。
+    # ⚠️ 查它有没有进包，别用 `pyi-archive_viewer -l`（默认不递归，纯 py 模块在 PYZ 里，
+    #   永远 grep 不到）；用 `-l -r`，或者直接 grep Analysis-00.toc。
     hiddenimports=_tb_hidden + ['PIL._tkinter_finder'] + ['web_kit', 'web_app', 'web_host'] + _pv_hidden,
     hookspath=[],
     hooksconfig={},

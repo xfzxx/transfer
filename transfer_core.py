@@ -26,6 +26,7 @@ import os
 import queue
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import tkinter.messagebox as messagebox
@@ -35,6 +36,93 @@ import config
 import state_db
 class DiskFullError(Exception):
     """目标磁盘空间不足：立即中止整个传输任务，不再逐文件重试。"""
+
+
+# ===================== 开始前预检（2026-11-04 新增） =====================
+def preflight_local(src, dsts, *, min_free_gb, need_bytes=None):
+    r"""开跑前的**亚秒级**体检。返回问题清单（空列表 = 通过）。
+
+    【纯函数】不碰界面、不读 Tk 变量、不起线程 —— 判据测试可以直接喂路径进来，
+    不用把整个应用装起来。
+
+    【它补的是哪两个洞】
+      既有的 `_probe_local_path` 只验「存在 / 能 stat」，验不出两种失败：
+        ① **目标文件夹在、但写不进去**（只读盘、ACL 拒绝、盘满）——现在要传到
+           第 N 个文件才炸，前面白传；
+        ② **源文件夹是空的**——现在会一路"成功"到收尾，界面报「完成 0 个文件」，
+           用户很容易当成"传完了"。
+      这两种在开跑前都能用**一次写探针 + 一次 scandir** 在毫秒级回答。
+
+    【刻意不做的事】
+      · **不扫全源算总量**：那是阶段 4 花力气消灭的"等整棵树扫完再传"。
+        `need_bytes` 只在调用方**已经知道**总量时才传（单文件源就是这种）。
+        未知时退化成"保底余量"判断（`min_free_gb`），不阻塞。
+      · **不重复既有的"源目标重合"校验**：`_launch_source` 里那条 commonpath
+        更老也更严格（还管 UNC），这里再写一份就是两份真相。
+
+    【探针不留垃圾】`.transfer_probe_*` 写完立刻 unlink，`finally` 里再兜一次 ——
+    用户目录里出现神秘的小文件，比不检查更糟。
+    """
+    problems = []
+
+    # ① 源非空（文件天然非空；目录要看里面有没有东西）
+    try:
+        if os.path.isdir(src):
+            with os.scandir(src) as it:
+                if next(it, None) is None:
+                    problems.append(
+                        "源文件夹是空的：%s\n\n"
+                        "继续下去只会以「完成 0 个文件」收场，看起来像成功、其实什么也没传。"
+                        % src)
+    except OSError as e:
+        problems.append("无法读取源文件夹：%s\n原因：%s" % (src, e))
+
+    # 单文件源的大小是**白拿的**，不需要扫目录就能做精确的空间判断
+    if need_bytes is None:
+        try:
+            if os.path.isfile(src):
+                need_bytes = os.path.getsize(src)
+        except OSError:
+            need_bytes = None
+
+    floor_bytes = float(min_free_gb) * (1024 ** 3)
+
+    for dst in dsts:
+        # ② 目标可写：写一个字节再删掉。**不替用户建目录** ——
+        #    目录不存在的情况由 `_probe_local_path` 已经拦在前面了，
+        #    这里要是 makedirs，"路径打错一个字"就变成"凭空多了一棵树"。
+        probe = None
+        try:
+            fd, probe = tempfile.mkstemp(prefix=".transfer_probe_", dir=dst)
+            try:
+                os.write(fd, b"x")
+            finally:
+                os.close(fd)
+        except OSError as e:
+            problems.append("目标文件夹不可写：%s\n原因：%s\n\n"
+                            "（在它里面写一个临时文件就失败了，传输必然跟着失败）" % (dst, e))
+        finally:
+            if probe:
+                try:
+                    os.unlink(probe)
+                except OSError:
+                    pass
+
+        # ③ 空间：已知总量就精确比，未知就只看保底余量
+        try:
+            free = shutil.disk_usage(dst).free
+        except OSError:
+            continue                       # 量不出来就当没这项，别把任务拦在没有依据的判断上
+        if free < floor_bytes:
+            problems.append("目标盘剩余空间不足：%s 只剩 %.2f GB，"
+                            "低于保底 %.2f GB。\n\n请先清理，或换一个目标盘。"
+                            % (dst, free / (1024 ** 3), min_free_gb))
+        elif need_bytes is not None and free < need_bytes * 1.05:
+            problems.append("目标盘剩余空间不够：本次需要约 %.2f GB，"
+                            "%s 只剩 %.2f GB（已按 5%% 余量判断）。\n\n"
+                            "请先清理，或换一个目标盘。"
+                            % (need_bytes / (1024 ** 3), dst, free / (1024 ** 3)))
+    return problems
 
 
 # 【P1】判重记录的**统一读取器**。`_should_skip` 的六条闸门只从它取字段。
@@ -524,6 +612,29 @@ class TransferCore(object):
         self._hooks.on_path_problem(text)
         return False
 
+    def _preflight(self, src, dst, multi_dst=""):
+        """开跑前预检的**界面出口**（判据在模块级 `preflight_local`，纯函数、可单测）。
+
+        与 `_check_local_path` 同一个套路：判据在内核，弹框走 `hooks.on_path_problem`
+        —— 于是 Tk / C3 / C4 三档拿到的是**同一段文案**，Web 档自动落成前端模态框。
+
+        还多写一行日志（用户要求"日志和弹出都要有"）：弹框关掉之后，日志区里
+        留着的这行是**事后回看**唯一能对上号的东西（弹框不会留痕）。
+        注意日志区在这一刻**还没被本轮清空**（`_begin_run_log` 在拿到任务锁之后才调），
+        所以这行会落在上一轮的日志末尾 —— 那是可接受的：拒绝启动时本轮本来就没有日志。
+        """
+        if not config._PREFLIGHT_ENABLED:
+            return True
+        dsts = [d for d in (dst, multi_dst) if d]
+        problems = preflight_local(src, dsts,
+                                   min_free_gb=float(config.MIN_FREE_SPACE_REFUSE_GB))
+        if not problems:
+            return True
+        for line in problems:
+            self._ui._update_log("[预检] " + line.splitlines()[0])
+        self._hooks.on_path_problem("\n\n".join(problems))
+        return False
+
 
     # 【D-1 重构】`_start_transfer` 原来的整块函数体**一行没删、一行没改**，
     # 整体搬进了 `_launch_source` —— 因为多源串行要对**每个源**各做一遍，
@@ -829,6 +940,16 @@ class TransferCore(object):
                     ext = "." + ext   # 自动补点，如输入 "dcm" 也按 ".dcm" 处理
                 extensions.add(ext)
 
+        # ---- 【2026-11-04】开始前预检：写不进去 / 源是空的 / 盘几乎满了 ----
+        # 【为什么放在这个位置】结构性校验（路径存不存在、源目标重不重合、第二目标
+        #   合不合法）都已经过完了 —— 那些判的是"路径对不对"，这一条判的是
+        #   "这块盘现在能不能干活"。放在**抢任务锁之前**：拒绝启动不该去占锁。
+        # 【为什么只管本地 → 本地】FTP 目标的"可写"要真连一次服务器，是秒级且可能
+        #   挂住的操作；这段代码跑在按钮回调里（主线程），不能拿网络去赌。
+        if src_type in self._local_like_src and dst_type == "local":
+            if not self._preflight(src, dst, multi_dst):
+                return False
+
         # ---- 任务级锁：抢占成功之前不动任何 UI（Q6） ----
         task_id = self._claim_current_task(extensions)
         if task_id is None:
@@ -910,6 +1031,7 @@ class TransferCore(object):
         # （空源 / 路径不存在 / 目标在源内部 / 抢不到任务锁）要是走掉了，
         # 定时器就已经在空转了 —— 没任务在跑，却每 500ms 刷一次一个空标签。
         self._ui._note_task_start_time()      # 【第 1 步】ETA 的计时零点
+        self._run_started_ts = time.time()    # 【2026-11-04】收尾写 last_run.json 的耗时起点
         self._ui._start_speed_poll()
 
         # 【功能A-新增】落盘"这次用了什么参数"。
@@ -1922,6 +2044,83 @@ class TransferCore(object):
             t = self._src_totals
             self._ui._update_log("全部完成：%d 个源，共复制 %d 个，跳过 %d 个，失败 %d 个"
                              % (total, t["copied"], t["skipped"], t["failed"]))
+            self._notify_run_end(total, t)
+
+    # ===================== 收尾通知（2026-11-04 新增） =====================
+    def _notify_run_end(self, total_sources, totals):
+        r"""任务收尾的两条出口：**无头**写 `last_run.json`，**GUI** 弹托盘气泡。
+
+        【为什么两件事写在一个函数里】它们共用同一组数字（状态/文件数/失败数/耗时），
+        而且**必须同生同死**：分开写两份，迟早出现"气泡说 0 失败、json 说 3 个失败"
+        这种对不上的情况 —— 那比不通知更坏。
+
+        【无头为什么不弹气泡】无人值守的定时备份会在半夜弹一个没人看的气泡，
+        真正需要的是**第二天能查的痕迹**。所以它只落盘。
+
+        【GUI 为什么不写 json】有界面时用户就在跟前，气泡 + 日志区那两行足够；
+        再写一份文件只是多一个要清理的落点（而且 `data\` 里已经有不少东西了）。
+
+        【绝不因为通知失败而影响任务】整段包死 —— 传完了就是传完了，
+        一个气泡弹不出来不该让退出码变化。
+        """
+        copied = int(totals.get("copied", 0))
+        skipped = int(totals.get("skipped", 0))
+        failed = int(totals.get("failed", 0))
+        try:
+            elapsed = max(0.0, time.time() - getattr(self, "_run_started_ts", time.time()))
+        except Exception:                                # noqa: BLE001
+            elapsed = 0.0
+
+        # 退出码口径与 `config.SCHEDULE_EXIT_*` 逐字一致，免得两处各说各话
+        if failed == 0:
+            status, exit_code = "ok", config.SCHEDULE_EXIT_OK
+        elif copied + skipped > 0:
+            status, exit_code = "partial", config.SCHEDULE_EXIT_PARTIAL
+        else:
+            status, exit_code = "failed", config.SCHEDULE_EXIT_FAILED
+
+        headless = getattr(self, "_headless_task", None)
+        if headless:
+            try:
+                payload = {
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "task": str(headless),
+                    "status": status,
+                    "exit_code": exit_code,
+                    "sources": int(total_sources),
+                    "copied": copied,
+                    "skipped": skipped,
+                    "failed": failed,
+                    "elapsed_s": round(elapsed, 1),
+                }
+                path = os.path.join(config.DATA_DIR, "last_run.json")
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)        # 原子替换：监控方读到的永远是完整一份
+            except Exception as e:                        # noqa: BLE001
+                self._ui._threadsafe_log("[警告] 写 last_run.json 失败：%s" % e)
+            return
+
+        try:
+            import notify_win
+            if status == "ok":
+                title = "传输完成"
+                body = "共复制 %d 个，跳过 %d 个" % (copied, skipped)
+            elif status == "partial":
+                title = "传输结束（有失败）"
+                body = "复制 %d 个，失败 %d 个 · 详情见失败清单" % (copied, failed)
+            else:
+                title = "传输失败"
+                body = "一个都没成功，失败 %d 个 · 详情见失败清单" % failed
+            if elapsed >= 1:
+                # 复用 ETA 那支格式化（三档：秒 / 分秒 / 时分）—— 两处各写一份迟早不一致
+                body += " · 用时 %s" % self._ui._fmt_eta(elapsed)
+            notify_win.notify(title, body, error=(status != "ok"))
+        except Exception:                                # noqa: BLE001
+            pass
 
 
     # 【阶段2a-修改原因】主线程：把终态信封还原成阶段 1 的终态调用。
