@@ -269,6 +269,13 @@ LOCAL_RESUME_MIN_BYTES = 4 * 1024 * 1024
 # 误计。DATA_DIR 已经是本工具的私有区（库、配置、UX 状态都在这儿），放这里天然隔离。
 LOCAL_RESUME_CTX_DIR = os.path.join(DATA_DIR, ".ftp_transfer_parts")
 
+# 【2026-11-05】FTP **下载**续传的旁挂记录目录。
+# 【为什么不复用上面那个】两者 schema 完全不同：本地拷贝记 src/dst/size/mtime_ns
+#   （身份是一对本地路径）；下载记 remote/local/size/remote_mtime/transferred_bytes
+#   （远端是服务器路径 + UTC 时间）。混在一个目录里，键都是路径 md5 时字段会错位 ——
+#   程序不报错，只是每次都不续传或续错位置。
+LOCAL_FTP_DOWNLOAD_CTX_DIR = os.path.join(DATA_DIR, ".ftp_transfer_dl_parts")
+
 UPLOAD_RESUME_ENABLED = True
 
 # 【阶段5-新增】远端半截 .part 的回收。场景：进程被强杀/断电时 STOR 停下来，

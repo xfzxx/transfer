@@ -23,6 +23,9 @@ import time
 # ruff: 本项目多处 try/except/continue 是刻意的"这一条不算，继续下一条";理由逐处写在代码旁。
 # ruff: noqa: S112
 import ftplib
+import hashlib
+import io
+import json
 
 import config
 
@@ -89,6 +92,75 @@ def purge_stale_parts(ftp, remote_dir, days=7, now=None, log=None):
     if removed and log:
         log("[维护] 清理了 %d 个超过 %d 天的远端 .part（续传残渣）" % (removed, days))
     return removed
+
+
+# ===================== 【2026-11-05】FTP 下载续传 =====================
+def _dl_ctx_path(local_path):
+    try:
+        key = hashlib.md5(os.path.abspath(local_path).encode("utf-8", "surrogatepass")).hexdigest()
+    except Exception:
+        return ""
+    return os.path.join(config.LOCAL_FTP_DOWNLOAD_CTX_DIR, key + ".json")
+
+
+def load_dl_ctx(local_path):
+    """→ dict / None。老版本没有记录时是 None ⇒ 安全降级为从 0 重下。"""
+    path = _dl_ctx_path(local_path)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with io.open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def save_dl_ctx(local_path, remote_path, remote_size, remote_mtime, transferred):
+    path = _dl_ctx_path(local_path)
+    if not path:
+        return
+    try:
+        os.makedirs(config.LOCAL_FTP_DOWNLOAD_CTX_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"remote": remote_path, "local": os.path.abspath(local_path),
+                       "size": remote_size, "remote_mtime": remote_mtime,
+                       "transferred_bytes": int(transferred or 0)}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def plan_download_resume(ctx, part_path, remote_size, remote_mtime):
+    """→ (偏移, 原因, 是否丢弃)。**任何不确定都回 0。**
+
+    【远端 mtime 一变就必须丢】那意味着远端那份已经不是上次那份。本地 .part 的前半截
+    对应旧内容，拼出来的文件大小可能正好、内容却是两代拼接 —— 最坏的一种损坏。
+    """
+    try:
+        part_len = os.path.getsize(part_path)
+    except OSError:
+        return 0, "本地没有 .part，从 0 开始", False
+    if part_len <= 0:
+        return 0, ".part 是空的，从 0 开始", False
+    if not isinstance(ctx, dict):
+        return 0, "没有续传记录（老版本/首次），从 0 开始", False
+    try:
+        old_mtime = int(ctx.get("remote_mtime"))
+    except (TypeError, ValueError):
+        old_mtime = None
+    if remote_mtime is not None and old_mtime is not None and int(remote_mtime) != old_mtime:
+        return 0, "远端文件已变更（mtime 变了），丢弃 .part 从 0 重下", True
+    try:
+        rs = int(remote_size)
+    except (TypeError, ValueError):
+        rs = None
+    if rs is not None and part_len > rs:
+        return 0, "本地 .part 比远端还大，丢弃从 0 重下", True
+    if rs is not None and part_len == rs:
+        return 0, ".part 已与远端等长，直接改名即可", False
+    return part_len, "从 %d 字节处续传（远端 %s）" % (part_len, rs), False
 
 
 def _base_name(path):
@@ -655,8 +727,40 @@ class FTPHelper:
              与 files 表里记的 src_mtime 一致，续传判定才有可比的基准；
           2) 不传 mtime（缺省）时行为与阶段1 逐字一致：文件 mtime = 当前时间。
         失败不抛：改不动 mtime 只是让该文件下次重传，不该让整个下载失败。"""
-        with open(local_path, 'wb') as f:
-            self.ftp.retrbinary(f'RETR {remote_path}', f.write)
+        # 【2026-11-05】续传：.part 长度 + 旁挂记录 → rest=n；拿不准就 0。
+        caps = self.resume_caps or {}
+        remote_size = None
+        if caps.get("size"):
+            try:
+                remote_size = self.ftp.size(remote_path)
+            except Exception:
+                remote_size = None
+        offset, why, drop = plan_download_resume(
+            load_dl_ctx(local_path), local_path, remote_size, mtime)
+        if drop:
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+            offset = 0
+        if offset or drop:
+            self._log("[续传] %s：%s" % (_base_name(remote_path), why))
+        save_dl_ctx(local_path, remote_path, remote_size, mtime, offset)
+        with open(local_path, 'ab' if offset else 'wb') as f:
+            if offset:
+                self.ftp.retrbinary(f'RETR {remote_path}', f.write, rest=offset)
+            else:
+                self.ftp.retrbinary(f'RETR {remote_path}', f.write)
+        # 【全文件强校验】续传后**不能只校验追加的那一截**：两截来自不同时点，
+        #   只有整份对得上才算对。有 SIZE 就按大小核，比看片段可靠得多。
+        if remote_size is not None:
+            try:
+                got = os.path.getsize(local_path)
+            except OSError:
+                got = -1
+            if got != remote_size:
+                raise OSError("下载字节数不符：期望 %s，实际 %s（%s）"
+                              % (remote_size, got, local_path))
         if mtime is not None:
             try:
                 os.utime(local_path, (mtime, mtime))
