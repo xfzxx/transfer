@@ -875,6 +875,29 @@ class TransferStateDB:
             return [(r[0], r[1], r[2]) for r in rows]
 
     # 【阶段2a-修改原因】失败计数。供 _retry_failed 判空等"非 db-writer 线程"的场景。
+    def recent_failed(self, limit=200):
+        r"""最近失败的条目（**跨任务**，只读）。给界面上那个"失败清单"展开用。
+
+        【为什么不用 `iter_failed(task_id)`】那个按任务查，而用户点开清单的时机
+        往往是**任务刚结束之后** —— 那时 `_current_task_id` 可能已经归零。
+        "最近失败"在语义上本来就不该绑在某一次任务上：用户想看的是"还有哪些没传成功"。
+
+        【只读纪律】走 `self._read()`：每线程一条读连接，**不碰** `self._conn`
+        （那是 db-writer 独占的写连接）。所以这个查询既不会阻塞写，也不会被写锁挡住。
+        """
+        if not os.path.exists(self.db_path):
+            return []
+        try:
+            lim = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            lim = 200
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT filename, src_path, COALESCE(last_error, ''), "
+                "COALESCE(updated_at, '') FROM files WHERE status='failed' "
+                "ORDER BY updated_at DESC, filename LIMIT ?", (lim,)).fetchall()
+        return [(r[0], r[1], r[2], r[3]) for r in rows]
+
     def count_failed(self, task_id):
         if task_id is None:
             return 0

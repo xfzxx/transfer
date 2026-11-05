@@ -1763,6 +1763,35 @@ DB_KEEP_DAYS_RANGE = (30, 3650)
 
 DEFAULT_LOG_EXPORT_DIR = ""      # 空 = 沿用系统默认（弹保存框时的起始目录）
 
+# ---- 【2026-11-05】最近用过的源/目标路径（各留 5 个）----
+# 【为什么放 config 而不是宿主】写它的有两处（Tk 装配的右键菜单、Web 的 datalist），
+#   读它的也有两处（落盘、界面）。放宿主就得再开一条"core → 宿主"的回调边，
+#   而这份数据是**纯数据**、没有生命周期，与其它常量同层最省事。
+# 【只放内存】落盘统一走 ux 状态那份文件（`_collect_ux_state`），不另开一个文件 ——
+#   多一个落点就多一个"用户目录里多出来的东西"。
+RECENT_PATHS_MAX = 5
+RECENT_PATHS = {"source": [], "dest": []}
+
+
+def record_recent_path(kind, path):
+    r"""把一次**真的用过**的路径记进"最近 N 个"（去重、最近的在最前）。
+
+    【去重按大小写不敏感】Windows 路径 `D:\Data` 与 `d:\data` 是同一处，
+    按字节比会存成两条，用户看到两个一模一样的条目。
+    """
+    p_ = (path or "").strip()
+    if not p_ or kind not in RECENT_PATHS:
+        return
+    lst = RECENT_PATHS[kind]
+    key = p_.casefold()
+    for i, old in enumerate(lst):
+        if old.casefold() == key:
+            lst.pop(i)                    # 旧的挪到最前，不重复占位
+            break
+    lst.insert(0, p_)
+    del lst[RECENT_PATHS_MAX:]
+
+
 # 目标盘剩余空间预警阈值（GB）。0 = 关闭预警。
 # 【为什么是常量、不是设置项】这一项是"提醒"，不是"功能开关"：阈值定得太死会让
 # 备份中途失败的风险上升，定得太松则天天误报。2 GB 对 DICOM 批量传输是个保守的

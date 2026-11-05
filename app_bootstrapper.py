@@ -1234,6 +1234,10 @@ class AppBootstrapper:
             # 所以一个手改的 `{"date_template": 123}` 或者 `"YYYY/XX"` 都只回落到默认空串，
             # 不会让程序带着一个非法模板跑起来（那会让剪枝判据整段失效）。
             "date_template": self._app.date_template.get().strip(),
+            # 【2026-11-05】最近用过的源/目标路径（各 ≤5）。放这里而不是另开一个文件：
+            #   这份 ux JSON 本来就是"下次启动要记住的东西"的集合，多一个落点只是
+            #   让用户目录里多一样要清理的东西。
+            "recent_paths": {k: list(v) for k, v in config.RECENT_PATHS.items()},
             # ⚠️ **`purge_overwrites` 故意不在这里**。它是一次性授权（"这次连覆盖记录
             #    一起清"），不是偏好。存下来会让"勾过一次"变成"以后每次都勾着"，
             #    而那等于把默认值悄悄从"不勾"改成了"勾"—— 默认不勾是数据安全优先的
@@ -1281,6 +1285,21 @@ class AppBootstrapper:
         （`~\.ftp_transfer_ux.json` / `~\.ftp_transfer_schedules.json`）
         **用户都能直接编辑**，所以每一项都单独验类型、一个坏字段只让那一项回默认。
         """
+
+        # 【2026-11-05】最近路径：**只恢复认得的那部分**（旧文件没有这个键）。
+        #   逐项验类型 + 截断到上限，理由与上面白名单那一段逐字相同：
+        #   这份 JSON 用户能直接编辑，`{"recent_paths": 123}` 不该让程序起不来。
+        try:
+            rp = st.get("recent_paths")
+            if isinstance(rp, dict):
+                for kind in ("source", "dest"):
+                    vals = rp.get(kind)
+                    if isinstance(vals, list):
+                        clean = [x.strip() for x in vals
+                                 if isinstance(x, str) and x.strip()]
+                        config.RECENT_PATHS[kind] = clean[:config.RECENT_PATHS_MAX]
+        except Exception:                     # noqa: BLE001 —— 状态文件坏不该拦住启动
+            pass
         filled = 0
         if isinstance(st.get("source_path"), str) and st["source_path"]:
             self._app.source_path.set(st["source_path"])

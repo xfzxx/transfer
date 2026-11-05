@@ -950,6 +950,14 @@ class TransferCore(object):
             if not self._preflight(src, dst, multi_dst):
                 return False
 
+        # 【2026-11-05】记"最近用过的路径"。放在预检**之后** —— 预检没过的那次
+        #   用户并没有真的用它跑成任务，记进去只会把一条错路径顶到列表最前面。
+        try:
+            config.record_recent_path("source", src)
+            config.record_recent_path("dest", dst)
+        except Exception:                    # noqa: BLE001 —— 记账失败不该拦住开跑
+            pass
+
         # ---- 任务级锁：抢占成功之前不动任何 UI（Q6） ----
         task_id = self._claim_current_task(extensions)
         if task_id is None:

@@ -555,6 +555,9 @@ class WebBridge(object):
             # 建造代码里手写的字符串，与 `config.APP_VERSION` 各说各话。
             "version": config.APP_VERSION,
             "runtime": dict(getattr(self, "runtime", None) or {}),
+            # 【2026-11-05】最近用过的路径：前端拿它渲染 <datalist>，
+            #   与 Tk 档的右键菜单是同一份数据（都在 config.RECENT_PATHS 里）。
+            "recent_paths": {k: list(v) for k, v in config.RECENT_PATHS.items()},
             "data_dir": config.DATA_DIR,
             "messages": msgs,
         }
@@ -563,6 +566,22 @@ class WebBridge(object):
         return self.call_on_main(self._snapshot)
 
     # ---- 设置页：草稿式保存 ----
+    def failed_list(self, limit=200):
+        r"""最近失败的条目（只读查询，给界面上"失败清单"用）。
+
+        【线程】**不走主线程**：`state_db.recent_failed` 用的是每线程一条的读连接，
+        不碰 db-writer 的写连接 —— 所以它在请求线程里直接跑就行，
+        既不会阻塞主线程（界面不掉帧），也不会挡住写（不会和批提交抢锁）。
+        这正是需求里那条"只读查询、不许阻断主流程或干扰写锁"的落点。
+        """
+        try:
+            rows = self.app._db.recent_failed(limit)
+        except Exception as e:                       # noqa: BLE001
+            return {"ok": False, "error": str(e), "items": []}
+        return {"ok": True,
+                "items": [{"name": r[0], "src": r[1], "error": r[2], "at": r[3]}
+                          for r in rows]}
+
     def save_settings(self, values):
         r"""校验 → 下发 → 落盘。返回 `{ok, values|errors, persisted}`。
 
@@ -1141,6 +1160,14 @@ def _make_handler(bridge):
                     return self._send(200, json.dumps({"ok": False,
                                                        "error": str(e)},
                                                       ensure_ascii=False))
+            if path == "/api/failed":
+                qs = urllib.parse.parse_qs(query)
+                try:
+                    lim = int((qs.get("limit") or ["200"])[0])
+                except (TypeError, ValueError):
+                    lim = 200
+                return self._send(200, json.dumps(bridge.failed_list(lim),
+                                                  ensure_ascii=False))
             if path == "/api/ping":
                 # 第二个实例 / 探活脚本用；**不走主线程**（见 `WebBridge.ping`）。
                 return self._send(200, json.dumps(bridge.ping(), ensure_ascii=False))
