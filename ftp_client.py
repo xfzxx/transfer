@@ -31,6 +31,69 @@ import config
 # 从外面拿不到那个 socket 对象，唯一的切入点就是在这里给它 settimeout。
 # 语义是"每次 recv/send 最多等这么久"——即"连续 30 秒没字节"才算卡死，
 # 而不是"整个文件必须在 30 秒内传完"（后者会让大文件在慢链路上必死）。
+# ===================== 【2026-11-05】加密通道下的续传能力探测 =====================
+# 【为什么必须探测】`SIZE` / `MDTM` / `REST` 这三条在所有 FTP 服务器上都是"可选"的，
+#   在 FTPS（PROT P）下更是参差不齐：有的服务器数据通道加密了、但 `REST` 直接回 502。
+#   不探的后果不是报错，是**静默整文件重传** —— 20 万文件的夜里备份，慢一倍没人知道。
+# 【为什么用 `REST 0` 探而不是真续传】`REST 0` 是合法的空偏移请求：支持的服务器回 350，
+#   不支持的立刻回 5xx，且**不改变任何状态**（偏移 0 = 从头）。用它探最安全。
+_RESUME_PROBE_PATH = "/.ftp_transfer_resume_probe"
+_RESUME_REJECT_CODES = ("500", "501", "502", "504")
+
+
+def _probe_command(ftp, cmd):
+    """→ True/False（服务器接不接受这条命令）。出任何异常都当"不支持"。"""
+    try:
+        ftp.sendcmd(cmd)
+        return True
+    except ftplib.error_perm as e:
+        return str(e)[:3] not in _RESUME_REJECT_CODES
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
+def probe_resume_caps(ftp, log=None):
+    r"""探 SIZE / MDTM / REST 三条能力。→ `{"size": bool, "mdtm": bool, "rest": bool}`
+
+    【`REST 不被接受时必须喊一句】需求原文："服务器拒绝加密通道下的断点续传，
+    将从头开始传" —— 不许静默。所以这里直接回调 `log`，而不是只把结果塞进返回值：
+    返回值会被上层忘掉，日志不会。
+    """
+    caps = {
+        "size": _probe_command(ftp, "SIZE %s" % _RESUME_PROBE_PATH),
+        "mdtm": _probe_command(ftp, "MDTM %s" % _RESUME_PROBE_PATH),
+        "rest": _probe_command(ftp, "REST 0"),
+    }
+    if not caps["rest"] and log:
+        log("[警告] 服务器拒绝加密通道下的断点续传（REST 不受支持），"
+            "该任务的传输将**从头开始**，不做续传")
+    if not caps["size"] and log:
+        log("[警告] 服务器不支持 SIZE（无法核对远端大小）—— 上传校验会退化成只看字节数")
+    return caps
+
+
+def verify_resume_point(remote_size, part_size):
+    r"""能不能从 `part_size` 接着传？→ `(bool, 原因文本)`。
+
+    【为什么必须"正好等于"】`remote_size > part_size` 是正常续传；
+    `remote_size < part_size` 说明远端的半截文件比本地还短（另一边重传过 / 被换过），
+    这时**只能整文件重来** —— 拿一个更短的远端当基线接着写，写出来的文件是错的，
+    而且错得很安静（大小对得上、内容对不上）。
+    """
+    try:
+        rs = int(remote_size)
+        ps = int(part_size)
+    except (TypeError, ValueError):
+        return False, "远端大小未知（SIZE 不可用或返回非法值），从头开始"
+    if rs < 0 or ps < 0:
+        return False, "大小出现负数（服务器返回异常），从头开始"
+    if rs < ps:
+        return False, "远端文件比本地 .part 还短（%.0f < %.0f），判为不一致，从头开始" % (rs, ps)
+    if rs == ps:
+        return False, "远端已完整（%d 字节），无需续传" % rs
+    return True, "从 %d 字节处续传（远端 %d）" % (ps, rs)
+
+
 # ===================== 【2026-11-05】FTPS（显式 / 隐式 TLS） =====================
 def build_tls_context(allow_selfsigned):
     r"""建 TLS 上下文。
@@ -125,6 +188,9 @@ class FTPHelper:
         #   调用方（ftp_transfer / 维护任务）从配置里把这两项传进来。
         self.tls_mode = tls_mode or "none"
         self.allow_selfsigned = bool(allow_selfsigned)
+        # 【2026-11-05】续传能力（connect() 里探一次就固定）。`None` = 还没探过；
+        #   上层据此判断"能不能续"，而不是假设服务器一定支持 REST。
+        self.resume_caps = None
         self.ftp = None
         self.log_callback = None
         # 【阶段2d-新增】RNFR/RNTO 能力缓存：None=未探测，True/False=已探测结果。
@@ -162,6 +228,9 @@ class FTPHelper:
         if hasattr(self.ftp, 'encoding'):
             self.ftp.encoding = 'utf-8'
         self.ftp.voidcmd('TYPE I')
+        # 【2026-11-05】续传能力探测。放在 TYPE I 之后：这是连接就绪的最后一个动作，
+        #   探测失败也只影响"能不能续"，不影响连接本身能不能用。
+        self.resume_caps = probe_resume_caps(self.ftp, log=self._log)
 
     # 【阶段3-修改原因】改为**幂等**（原审计 P0-5）。连接池里同一条连接的收尾路径有
     # 三条且可能叠加：worker 正常退出、worker 异常退出、池的 close_all()。
