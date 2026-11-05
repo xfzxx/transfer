@@ -180,6 +180,7 @@ function renderHeader() {
 }
 
 function renderVars() {
+  if (state) renderLastRun({ text: state.last_run_text || "" });
   fillRecentDatalist(state && state.recent_paths);
   const vars = state.vars || {};
   const ranges = state.ranges || {};
@@ -643,6 +644,16 @@ async function openFailedPanel() {
     li.textContent = "读取失败：" + e;
     list.appendChild(li);
   }
+}
+
+/* 上次定时任务的结果（无记录则隐藏 —— 空的状态条比没有更让人疑惑） */
+function renderLastRun(d) {
+  const box = $("#last-run");
+  if (!box) return;
+  const text = (d && d.text) || "";
+  if (!text) { box.hidden = true; box.textContent = ""; return; }
+  box.textContent = text;
+  box.hidden = false;
 }
 
 function fillRecentDatalist(rp) {

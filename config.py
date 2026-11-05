@@ -1125,6 +1125,46 @@ def save_config(config):
 #   属界面层的判断，塞进常量模块只会让两边各存一份、迟早对不上。
 UX_STATE_FILE = os.path.join(DATA_DIR, ".ftp_transfer_ux.json")
 
+# ---- 【2026-11-05】无头任务的结果落点（供界面显示"上次定时任务"）----
+LAST_RUN_FILE = os.path.join(DATA_DIR, "last_run.json")
+
+
+def load_last_run():
+    r"""读 `last_run.json`。**任何异常都返回 None**，绝不抛。
+
+    【为什么这么宽容】这份文件是给**显示**用的：文件不存在（从没跑过无头任务）、
+    写到一半断电（JSON 截断）、或者被谁手改坏了 —— 三种情况都只该让那行字消失，
+    不该让界面打不开。所以这里连 `UnicodeDecodeError` 一起吞。
+    """
+    try:
+        if not os.path.exists(LAST_RUN_FILE):
+            return None
+        with open(LAST_RUN_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
+def format_last_run(d):
+    r"""把那份 dict 说成一句人话；认不出来返回空串（界面据此隐藏）。"""
+    if not isinstance(d, dict):
+        return ""
+    when = str(d.get("finished_at") or "").replace("T", " ")
+    status = {"ok": "成功", "partial": "有失败", "failed": "失败"}.get(
+        str(d.get("status")), "")
+    if not when or not status:
+        return ""
+    bits = ["上次定时任务：%s %s" % (when, status)]
+    try:
+        bits.append("复制 %d 个" % int(d.get("copied") or 0))
+        if int(d.get("failed") or 0):
+            bits.append("失败 %d 个" % int(d.get("failed") or 0))
+    except (TypeError, ValueError):
+        pass
+    return " · ".join(bits)
+
+
 
 def load_ux_state():
     """读上次的界面状态。文件不存在 / 读坏 / 不是 dict → 一律返回 None。

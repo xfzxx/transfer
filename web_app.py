@@ -558,6 +558,9 @@ class WebBridge(object):
             # 【2026-11-05】最近用过的路径：前端拿它渲染 <datalist>，
             #   与 Tk 档的右键菜单是同一份数据（都在 config.RECENT_PATHS 里）。
             "recent_paths": {k: list(v) for k, v in config.RECENT_PATHS.items()},
+            # 【2026-11-05】上次无头任务的结果。`_last_run` 只读一次盘：
+            #   这份文件很小（<300 B），但快照是 3 次/秒 —— 分两次读就是白白多一倍 IO。
+            **_last_run_fields(),
             "data_dir": config.DATA_DIR,
             "messages": msgs,
         }
@@ -1160,6 +1163,11 @@ def _make_handler(bridge):
                     return self._send(200, json.dumps({"ok": False,
                                                        "error": str(e)},
                                                       ensure_ascii=False))
+            if path == "/api/last_run":
+                d = config.load_last_run()
+                return self._send(200, json.dumps(
+                    {"ok": True, "last": d, "text": config.format_last_run(d)},
+                    ensure_ascii=False))
             if path == "/api/failed":
                 qs = urllib.parse.parse_qs(query)
                 try:
@@ -1594,6 +1602,12 @@ def run_c3(bridge, port=DEFAULT_PORT, title=None, port_tries=1):
     return 0
 
 
+def _last_run_fields():
+    """→ `{"last_run": dict|None, "last_run_text": str}`。读一次盘，供快照与 Tk 档共用。"""
+    d = config.load_last_run()
+    return {"last_run": d, "last_run_text": config.format_last_run(d)}
+
+
 def run_tk():
     r"""纯 Tk 档：真 `tkinter` 窗口，**一个替身都不装**。
 
@@ -1637,6 +1651,12 @@ def run_tk():
 
     root = tk.Tk()
     app = file_transfer.FileTransferApp(root)        # noqa: F841 — 由 root 的控件树持有
+    # 【2026-11-05】上次定时任务的结果。写进日志区而不是新开状态条：
+    #   这个 Tab 的高度余量本来就只剩几十像素（T4 那条债），多一行控件就是再借一次。
+    #   没有记录时**什么都不写** —— 空行比没有更让人疑惑。
+    _txt = _last_run_fields()["last_run_text"]
+    if _txt:
+        app._ui._update_log(_txt)
     root.mainloop()
     return 0
 

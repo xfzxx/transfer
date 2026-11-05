@@ -2101,7 +2101,7 @@ class TransferCore(object):
                     "failed": failed,
                     "elapsed_s": round(elapsed, 1),
                 }
-                path = os.path.join(config.DATA_DIR, "last_run.json")
+                path = config.LAST_RUN_FILE      # 单一来源：写入点与读取点用同一个常量
                 tmp = path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
