@@ -34,6 +34,35 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 import state_db
+# ===================== 【2026-11-05】续传偏移的读取规则 =====================
+def resume_offset_from_ctx(ctx, part_path):
+    r"""→ 应从第几字节续。**老记录（没有 `transferred_bytes`）退回 .part 实际长度。**
+
+    【为什么以 .part 长度为准、字段只作参考】字段是"上次记下的进度"，而 .part 是
+    **磁盘上真实存在了多少字节**。两者冲突时永远信磁盘：
+      · 字段 > .part 长度（记完进度又断电/被清理）→ 用 .part 长度，否则会跳过一段没写的数据；
+      · 字段 < .part 长度（写进字段后又多写了一点）→ 仍然用 .part 长度，多出来的那点
+        是**已经落盘的正确数据**，丢掉只是白重传。
+    结论：`offset = min(字段, .part 长度)`，字段缺失时就是 .part 长度。
+    """
+    try:
+        part_len = os.path.getsize(part_path)
+    except OSError:
+        return 0
+    if part_len <= 0:
+        return 0
+    got = None
+    if isinstance(ctx, dict):
+        got = ctx.get("transferred_bytes")
+    try:
+        got = int(got)
+    except (TypeError, ValueError):
+        got = None
+    if got is None or got < 0:
+        return part_len                      # 老记录 / 坏字段 → 按磁盘实际长度
+    return min(got, part_len)
+
+
 class DiskFullError(Exception):
     """目标磁盘空间不足：立即中止整个传输任务，不再逐文件重试。"""
 
@@ -1345,7 +1374,7 @@ class TransferCore(object):
         except OSError:
             return False
 
-    def _write_resume_ctx(self, ctx_path, src, dst):
+    def _write_resume_ctx(self, ctx_path, src, dst, transferred_bytes=0):
         if not ctx_path or not self._resume_worth_keeping(src):
             return
         try:
@@ -1357,6 +1386,9 @@ class TransferCore(object):
                            "dst": os.path.abspath(dst),
                            "size": size,
                            "mtime_ns": mtime,
+                           # 【2026-11-05】已写字节数。**老记录没有这个键**，读的时候
+                           # 一律退回"按 .part 实际长度判断"（见 `resume_offset_from_ctx`）。
+                           "transferred_bytes": int(transferred_bytes or 0),
                            "at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
                           f, ensure_ascii=False)
             os.replace(tmp, ctx_path)

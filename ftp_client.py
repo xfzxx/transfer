@@ -20,6 +20,8 @@ import queue
 import socket
 import ssl
 import time
+# ruff: 本项目多处 try/except/continue 是刻意的"这一条不算，继续下一条";理由逐处写在代码旁。
+# ruff: noqa: S112
 import ftplib
 
 import config
@@ -39,6 +41,54 @@ import config
 #   不支持的立刻回 5xx，且**不改变任何状态**（偏移 0 = 从头）。用它探最安全。
 _RESUME_PROBE_PATH = "/.ftp_transfer_resume_probe"
 _RESUME_REJECT_CODES = ("500", "501", "502", "504")
+
+
+def purge_stale_parts(ftp, remote_dir, days=7, now=None, log=None):
+    r"""删掉 `remote_dir` 下超过 `days` 天的 `*.part`。→ 删除条数。
+
+    【为什么需要它】上传续传上线后，失败会**保留** .part（那是下次的起点）。但若某个
+    文件永远传不上去（源被删了、权限不对），它的 .part 会永远躺在服务器上 ——
+    续传功能不该变成新的垃圾来源。
+
+    【为什么用 `MDTM` 判年龄】**不能**用"目录里看到它很久没动"，FTP 没有这种 API；
+    `MDTM` 返回 UTC 的 `YYYYMMDDHHMMSS`，是唯一可靠的时间来源。服务器不支持 MDTM 时
+    一条都不删（宁可留垃圾，也不要凭猜删别人的文件）。
+
+    【只删 .part，且只删 `remote_dir` 这一层】不递归、不按通配符删别的东西 ——
+    这条清理跑在别人的生产服务器上，尺度必须窄到"删错了也不心疼"。
+    """
+    suffix = config.UPLOAD_PART_SUFFIX
+    try:
+        names = ftp.nlst(remote_dir) or []
+    except Exception:                                  # noqa: BLE001
+        return 0
+    import calendar as _cal
+    import time as _time
+    base = _time.time() if now is None else now
+    removed = 0
+    for entry in names:
+        name = str(entry).rstrip("/").split("/")[-1]
+        if not name.endswith(suffix):
+            continue
+        remote_path = str(entry) if "/" in str(entry) else (
+            remote_dir.rstrip("/") + "/" + name)
+        try:
+            raw = ftp.sendcmd("MDTM %s" % remote_path).split()[-1]
+            mt = _cal.timegm(_time.strptime(raw[:14], "%Y%m%d%H%M%S"))
+        except Exception:                              # noqa: BLE001
+            # 判不出年龄就跳过这一个（不动它）。这里**刻意不记日志**：一个目录几十个
+            # .part，逐个报"读不到 MDTM"会把日志刷满，而结论都一样——不删。
+            continue
+        if (base - mt) < days * 86400:
+            continue
+        try:
+            ftp.delete(remote_path)
+            removed += 1
+        except Exception:                              # noqa: BLE001
+            pass
+    if removed and log:
+        log("[维护] 清理了 %d 个超过 %d 天的远端 .part（续传残渣）" % (removed, days))
+    return removed
 
 
 def _base_name(path):
