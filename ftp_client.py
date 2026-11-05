@@ -41,6 +41,11 @@ _RESUME_PROBE_PATH = "/.ftp_transfer_resume_probe"
 _RESUME_REJECT_CODES = ("500", "501", "502", "504")
 
 
+def _base_name(path):
+    """日志里只写文件名（完整远端路径太长，会把日志挤成一团）。"""
+    return (path or "").replace("\\", "/").rstrip("/").split("/")[-1]
+
+
 def _probe_command(ftp, cmd):
     """→ True/False（服务器接不接受这条命令）。出任何异常都当"不支持"。"""
     try:
@@ -628,10 +633,50 @@ class FTPHelper:
             self._rename_ok = code not in ('500', '501', '502', '504')
         return self._rename_ok
 
-    def _upload_direct(self, local_path, remote_path):
-        """把数据直接 STOR 到目标路径（阶段1 的原始行为）。"""
+    def _upload_direct(self, local_path, remote_path, rest=0):
+        """把数据 STOR 到目标路径。`rest>0` 时从该偏移续传（阶段1 行为 + 续传）。
+
+        【为什么用 `storbinary(rest=)` 而不是自己先 `REST`】`storbinary` 内部会先发
+        `REST n` 再发 `STOR`，两者是**同一条命令序列**；分开写就多一个"REST 成功了、
+        STOR 还没发就断线"的中间态，恢复起来还要判断偏移是否已生效。
+        """
         with open(local_path, 'rb') as f:
-            self.ftp.storbinary(f'STOR {remote_path}', f)
+            if rest:
+                f.seek(rest)
+            self.ftp.storbinary(f'STOR {remote_path}', f, rest=rest)
+
+    def _plan_upload_resume(self, part_remote, local_path):
+        r"""→ `(偏移, 原因)`。**任何不确定都返回 0（从头传）** —— 慢一点可以接受，
+        拼出"大小对、内容错"的文件不行。
+
+        判据（缺一不可）：
+          · 服务器支持 SIZE（否则不知道远端 .part 到底有多少字节）；
+          · 远端 .part 存在且 `0 < len < 本地大小`；
+          · `len > 本地大小` ⇒ 远端那份比源还长，必然是别人的/上次传错文件 ⇒ 从头。
+        """
+        caps = self.resume_caps or {}
+        if not caps.get("size"):
+            return 0, "服务器不支持 SIZE，无法核对续传点，从头开始"
+        try:
+            remote_len = self.ftp.size(part_remote)
+        except Exception:                              # noqa: BLE001
+            return 0, "取远端 .part 大小失败，从头开始"
+        if remote_len is None:
+            return 0, "远端 .part 不存在，从头开始"
+        try:
+            local_len = os.path.getsize(local_path)
+        except OSError:
+            return 0, "读不到本地文件大小，从头开始"
+        if remote_len <= 0:
+            return 0, "远端 .part 是空文件，从头开始"
+        if remote_len > local_len:
+            return 0, ("远端 .part（%d B）比本地文件（%d B）还长，判为不一致，从头开始"
+                       % (remote_len, local_len))
+        if remote_len == local_len:
+            return 0, "远端 .part 已与本地等长，直接改名即可"
+        if not caps.get("rest"):
+            return 0, "服务器拒绝 REST，从头开始"
+        return remote_len, "从 %d / %d 字节处续传" % (remote_len, local_len)
 
     def upload_file(self, local_path, remote_path):
         """直接使用完整的远程绝对路径上传。
@@ -657,8 +702,15 @@ class FTPHelper:
             return
 
         part = remote_path + config.UPLOAD_PART_SUFFIX
+        # 【2026-11-05】续传：先问"能不能从 .part 接着传"，再动手。
+        _offset, _why = self._plan_upload_resume(part, local_path)
+        if _offset:
+            self._log("[续传] %s：%s" % (_base_name(remote_path), _why))
+        elif "从头" in _why:
+            # 降级一律出声（不许静默整文件重传 —— 那是这台机器最常见的性能黑洞）
+            self._log("[续传] %s：%s" % (_base_name(remote_path), _why))
         try:
-            self._upload_direct(local_path, part)
+            self._upload_direct(local_path, part, rest=_offset)
             self._verify_size(local_path, part)
             try:
                 self.ftp.rename(part, remote_path)
@@ -669,10 +721,21 @@ class FTPHelper:
                 self.ftp.delete(remote_path)
                 self.ftp.rename(part, remote_path)
         except BaseException:
-            try:
-                self.ftp.delete(part)        # 失败不留 .part 残渣（不完整的那份无保留价值）
-            except Exception:
-                pass
+            # 【2026-11-05】可续的服务器上**留着 .part** —— 那正是下次续传的起点。
+            #   不可续（无 SIZE / 无 REST）时才删：留着也接不上，只会在服务器上堆垃圾。
+            caps = self.resume_caps or {}
+            if caps.get("size") and caps.get("rest"):
+                try:
+                    _n = self.ftp.size(part)
+                    self._log("[续传] 已保留远端 .part（%s 字节），下次从这里接着传"
+                              % (_n if _n is not None else "?"))
+                except Exception:            # noqa: BLE001
+                    pass
+            else:
+                try:
+                    self.ftp.delete(part)    # 不可续：不完整的那份无保留价值
+                except Exception:
+                    pass
             raise
 
     # 【阶段2d-新增】上传后的字节数自检。远端 size 未知一律按不通过处理：
