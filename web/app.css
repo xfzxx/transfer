@@ -274,3 +274,35 @@ main { padding: 16px 18px 40px; max-width: 960px; margin: 0 auto; }
 .modal-box-sm { width: min(420px, 92vw); }
 .dialog-msg { margin: 4px 0 0; white-space: pre-wrap; line-height: 1.5; }
 .modal-foot { gap: 8px; }
+
+/* ===================== 【2026-11-05】最近路径右键菜单 / 失败清单 ===================== */
+/* 自绘的小菜单：position: absolute + 跟随鼠标坐标（见 app.js popupRecent）。
+   z-index 要压过日志区与进度条，否则会被它们盖住。 */
+.recent-menu {
+  position: absolute;
+  z-index: 9999;
+  background: #fff;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .12);
+  padding: 4px 0;
+  min-width: 240px;
+  max-width: 560px;
+}
+.recent-item {
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-item:hover { background: #eef4fd; }
+/* 失败条目：路径与错误信息要**换行显示**（pre-wrap 保留 \n），否则一长串挤成一行 */
+.failed-item {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+}

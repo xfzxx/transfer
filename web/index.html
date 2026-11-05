@@ -49,6 +49,9 @@
           <button class="btn btn-outline" data-semantic="source_move_up" title="上移">↑</button>
           <button class="btn btn-outline" data-semantic="source_move_down" title="下移">↓</button>
           <button class="btn btn-outline" data-semantic="source_dedupe" title="去掉重复项">去重</button>
+        <!-- 【2026-11-05】失败清单：点开才查（/api/failed 只读，不碰写锁）。
+             与 Tk 档同名控件（failed_list_btn），两档入口一致。 -->
+        <button class="btn btn-outline" id="failed-btn">失败清单</button>
           <button class="btn btn-outline" id="src-gear" title="FTP 设置">⚙</button>
         </div>
       </div>
@@ -58,7 +61,7 @@
     <div class="card">
       <div class="card-head"><span>目标文件夹</span></div>
       <div class="row">
-        <input class="input grow" data-var="dest_path" type="text" spellcheck="false">
+        <input class="input grow" data-var="dest_path" type="text" spellcheck="false" list="recent-dest">
         <select class="input" data-var="dest_type">
           <option value="local">本地</option>
           <option value="ftp">FTP</option>
@@ -433,5 +436,16 @@
 </div>
 
 <script src="/static/app.js"></script>
+  <datalist id="recent-dest"></datalist>
+
+  <!-- 失败清单面板（默认收起；点「失败清单」才拉 /api/failed） -->
+  <div id="failed-panel" class="card" hidden>
+    <div class="row" style="justify-content: space-between; align-items: center;">
+      <strong>最近失败的条目</strong>
+      <button class="btn btn-outline" id="failed-close">关闭</button>
+    </div>
+    <ul class="list" id="failed-list"></ul>
+  </div>
+
 </body>
 </html>

@@ -390,7 +390,8 @@ class TransferForm(object):
         dst_group.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0,10))
         dst_frame = ttkbootstrap.Frame(dst_group)
         dst_frame.pack(fill="x")
-        ttkbootstrap.Entry(dst_frame, textvariable=self.dest_path, width=38).pack(side="left", fill="x", expand=True, padx=(0,4))
+        self.dest_entry = ttkbootstrap.Entry(dst_frame, textvariable=self.dest_path, width=38)
+        self.dest_entry.pack(side="left", fill="x", expand=True, padx=(0,4))
         _quiet_option_menu(ttkbootstrap.OptionMenu(dst_frame, self.dest_type,
                                                    "local", "local", "ftp")).pack(side="left", padx=(0,4))
         ttkbootstrap.Button(dst_frame, text="浏览", command=self._browse_dest,
@@ -491,6 +492,15 @@ class TransferForm(object):
         self.retry_btn = ttkbootstrap.Button(btn_frame, text="重传失败", command=self._core._retry_failed,
                                              state="disabled", bootstyle="secondary")
         self.retry_btn.pack(side="left", padx=(6,0))
+        # 【2026-11-05】失败清单：**只读**展示（点开才查，查询走 state_db 的读连接，
+        #   不碰 db-writer 的写连接）。放在"重传失败"旁边 —— 用户看到这两个按钮
+        #   的先后关系就是"先看看失败了什么，再决定要不要重传"。
+        self.failed_list_btn = ttkbootstrap.Button(btn_frame, text="失败清单",
+                                                   command=self._show_failed_list,
+                                                   bootstyle="secondary-outline")
+        self.failed_list_btn.pack(side="left", padx=(6,0))
+        # 两个右键菜单（源列表 / 目标输入框）—— 位置放在这里：两个控件此时都已建好
+        self._bind_recent_menus()
 
         # ---- 速度 / ETA（功能B）----
         # 【硬约束 9：这算"修 UI 缺陷"还是"改 UI 布局"】
@@ -767,6 +777,69 @@ class TransferForm(object):
 
         self._load_ftp_profiles()
     # ---- FTP 设置按钮 ----
+    # ===================== 【2026-11-05】最近路径 / 失败清单 =====================
+    def _recent_menu(self, kind, widget, apply_value):
+        """右键弹出"最近用过的路径"。
+
+        【为什么挂在右键而不是加一个下拉控件】源侧没有文本输入框（源是一张
+        `Listbox`，`source_path` 由选中项驱动），硬加一个下拉就是**新控件** ——
+        那要同时改替身层与 Web 三件套，为一个辅助功能不值。右键菜单是同一个
+        交互能力，且不占布局（这个 Tab 的高度余量本来就只有几十像素）。
+
+        【没有记录时不弹】空菜单比"点了没反应"更让人困惑。
+        """
+        items = list(config.RECENT_PATHS.get(kind) or [])
+        if not items:
+            return
+        m = tk.Menu(widget, tearoff=0)
+        for path in items:
+            m.add_command(label=path, command=lambda _p=path: apply_value(_p))
+        try:
+            m.tk_popup(widget.winfo_pointerx(), widget.winfo_pointery())
+        finally:
+            m.grab_release()
+
+    def _bind_recent_menus(self):
+        """两处右键：源列表（回填 `source_path`）、目标输入框（回填 `dest_path`）。"""
+        self.source_listbox.bind(
+            "<Button-3>",
+            lambda _e: self._recent_menu("source", self.source_listbox, self.source_path.set))
+        self.dest_entry.bind(
+            "<Button-3>",
+            lambda _e: self._recent_menu("dest", self.dest_entry, self.dest_path.set))
+
+    def _show_failed_list(self):
+        """弹一个只读的失败清单窗口。
+
+        【查询纪律】`recent_failed` 走 `_read()`（每线程读连接），**不碰写连接** ——
+        所以任务正在跑的时候点它也不会卡住任何一方。整段包了 try：
+        清单是"看情况"的功能，读不出来就提示一句，绝不该把主流程带崩。
+        """
+        try:
+            rows = self._host._db.recent_failed(200)
+        except Exception as e:                        # noqa: BLE001
+            messagebox.showwarning("失败清单", "读取失败清单时出错：%s" % e)
+            return
+        if not rows:
+            messagebox.showinfo("失败清单", "最近没有失败的记录。")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("失败清单（最近 %d 条）" % len(rows))
+        win.geometry("900x420")
+        txt = tk.Text(win, wrap="none", height=20)
+        sb = ttkbootstrap.Scrollbar(win, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        for name, src, err, at in rows:
+            block = [at + "  |  " + name,
+                     "    " + src,
+                     "    " + (err or "（无错误信息）"), ""]
+            txt.insert("end", "\n".join(block) + "\n")
+        txt.configure(state="disabled")               # 只读：不许编辑，也不许误删
+        ttkbootstrap.Button(win, text="关闭", command=win.destroy,
+                            bootstyle="secondary-outline").pack(side="bottom", pady=6)
+
     def _ftp_settings(self, is_source):
         """Tab1 的 ⚙：改的是**当前激活的那一套**配置。
 

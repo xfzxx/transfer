@@ -180,6 +180,7 @@ function renderHeader() {
 }
 
 function renderVars() {
+  fillRecentDatalist(state && state.recent_paths);
   const vars = state.vars || {};
   const ranges = state.ranges || {};
   $$("[data-var]").forEach((el) => {
@@ -603,11 +604,89 @@ function bindButtons() {
      * 后端那个会卡在 `filedialog` 替身上的 `_export_log`。这一条跳过，
      * 免得两个处理器同时挂在同一个按钮上。 */
     if (el.dataset.click === "export_log_btn") return;
+    /* 失败清单按钮走独立的 id 绑定（见下方 bindRecentPaths 之后那段）：
+     * 它要的是 /api/failed 的只读结果，不是后端那个会开 Tk 窗口的 `_show_failed_list`。 */
     el.addEventListener("click", () => invoke({ action: "click", target: el.dataset.click }));
   });
   $$("[data-semantic]").forEach((el) => {
     el.addEventListener("click", () => invoke({ action: "semantic", name: el.dataset.semantic }));
   });
+}
+
+async function openFailedPanel() {
+  const box = $("#failed-panel");
+  const list = $("#failed-list");
+  box.hidden = false;
+  list.innerHTML = "";
+  const li = document.createElement("li");
+  li.textContent = "读取中…";
+  list.appendChild(li);
+  try {
+    const r = await fetch("/api/failed?limit=200", { cache: "no-store" });
+    const j = await r.json();
+    list.innerHTML = "";
+    if (!j.ok) { li.textContent = "读取失败：" + (j.error || "未知错误"); list.appendChild(li); return; }
+    if (!j.items.length) { li.textContent = "最近没有失败的记录。"; list.appendChild(li); return; }
+    j.items.forEach((it) => {
+      const row = document.createElement("li");
+      row.className = "failed-item";
+      row.textContent = it.name + "  ·  " + (it.at || "") + "\n" + it.src + "\n" + (it.error || "（无错误信息）");
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = "";
+    li.textContent = "读取失败：" + e;
+    list.appendChild(li);
+  }
+}
+
+function fillRecentDatalist(rp) {
+  const dl = $("#recent-dest");
+  if (!dl) return;
+  dl.innerHTML = "";
+  (rp && rp.dest ? rp.dest : []).forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p;
+    dl.appendChild(o);
+  });
+}
+
+/* 右键"最近用过的路径"，与 Tk 档同构：源回填 source_path、目标回填 dest_path。
+ * 用前端自绘小菜单而不是新控件 —— Web 的源也是一张列表（没有输入框）。 */
+function popupRecent(kind, ev, applyPath) {
+  ev.preventDefault();
+  const rp = (state && state.recent_paths) || {};
+  const items = rp[kind] || [];
+  if (!items.length) return;
+  const old = $("#recent-menu");
+  if (old) old.remove();
+  const menu = document.createElement("div");
+  menu.id = "recent-menu";
+  menu.className = "recent-menu";
+  items.forEach((p) => {
+    const it = document.createElement("div");
+    it.className = "recent-item";
+    it.textContent = p;
+    it.onclick = () => { menu.remove(); applyPath(p); };
+    menu.appendChild(it);
+  });
+  menu.style.left = ev.pageX + "px";
+  menu.style.top = ev.pageY + "px";
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener("click", () => menu.remove(), { once: true }), 0);
+}
+
+function bindRecentPaths() {
+  const srcList = $("#source-list");
+  const dstInput = $('[data-var="dest_path"]');
+  if (srcList) {
+    srcList.addEventListener("contextmenu", (ev) =>
+      popupRecent("source", ev, (p) => invoke({ action: "set_var", name: "source_path", value: p })));
+  }
+  if (dstInput) {
+    dstInput.addEventListener("contextmenu", (ev) =>
+      popupRecent("dest", ev, (p) => invoke({ action: "set_var", name: "dest_path", value: p })));
+  }
 }
 
 function bindTabs() {
@@ -1377,6 +1456,11 @@ function main() {
   bindTabs();
   bindVars();
   bindButtons();
+  bindRecentPaths();
+  const fb = $("#failed-btn");
+  if (fb) fb.addEventListener("click", openFailedPanel);
+  const fc = $("#failed-close");
+  if (fc) fc.addEventListener("click", () => { $("#failed-panel").hidden = true; });
   bindMisc();
   bindPicker();
   bindFtpPicker();
