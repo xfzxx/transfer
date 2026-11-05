@@ -25,3 +25,9 @@ __pycache__/
 
 # ============ 运行数据（配置/状态库/日志，含 FTP 明文凭据，绝不入库）============
 /data/
+
+# ============ 安装包（脚本入库，产物与第三方运行时不入库）============
+# `installer/vendor/` 是微软的 WebView2 离线安装器（215MB 二进制），
+# 用 `installer/fetch-webview2.py` 现取；把它塞进仓库会让 clone 变成一次 200MB 下载。
+/installer/vendor/
+/installer/out/
