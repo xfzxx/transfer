@@ -1175,6 +1175,16 @@ _PROFILE_STR_KEYS = ("user", "password")     # 只做去空白，不做别的
 _PROFILE_REQUIRED = ("host",)                # 没有它就等于这一套不可用
 
 
+# ---- 【2026-11-05 FTPS】加密模式 ----
+# `none`     = 明文 FTP（默认，与升级前完全一致）
+# `explicit` = 显式 TLS（AUTH TLS / FTPES），控制与数据通道都加密，**端口仍是 21**
+# `implicit` = 隐式 TLS（FTPS），连上立刻握手，**端口通常 990**
+# 【为什么把取值放常量而不是各处字符串比较】三处要用它（配置清洗、界面下拉、连接构造），
+#   写死字符串迟早有一处拼错，而拼错的症状是"静默退回明文" —— 在医院内网里那是事故。
+TLS_MODES = ("none", "explicit", "implicit")
+TLS_MODE_LABELS = {"none": "无（明文）", "explicit": "显式 TLS（AUTH TLS）",
+                   "implicit": "隐式 TLS（FTPS，通常 990）"}
+
 def _clean_profile(d):
     """把一份配置字典验成规范形态，不合法返回 None。
 
@@ -1199,8 +1209,15 @@ def _clean_profile(d):
     remote_dir = d.get("remote_dir")
     if not isinstance(remote_dir, str):
         remote_dir = "/"
+    # 【2026-11-05 FTPS】加密模式与自签名策略。**默认不加密**，与升级前逐字节一致：
+    #   老配置文件里没有这两个键 ⇒ 行为不变；而"想加密"是一个必须显式做的选择。
+    tls_mode = d.get("tls_mode")
+    if tls_mode not in TLS_MODES:
+        tls_mode = "none"
+    allow_ss = bool(d.get("allow_selfsigned", False))
     out = {"name": name.strip(), "host": host.strip(), "port": port,
-           "remote_dir": remote_dir}
+           "remote_dir": remote_dir, "tls_mode": tls_mode,
+           "allow_selfsigned": allow_ss}
     for k in _PROFILE_STR_KEYS:
         v = d.get(k)
         out[k] = v if isinstance(v, str) else ""

@@ -18,6 +18,7 @@
 import os
 import queue
 import socket
+import ssl
 import time
 import ftplib
 
@@ -30,6 +31,67 @@ import config
 # 从外面拿不到那个 socket 对象，唯一的切入点就是在这里给它 settimeout。
 # 语义是"每次 recv/send 最多等这么久"——即"连续 30 秒没字节"才算卡死，
 # 而不是"整个文件必须在 30 秒内传完"（后者会让大文件在慢链路上必死）。
+# ===================== 【2026-11-05】FTPS（显式 / 隐式 TLS） =====================
+def build_tls_context(allow_selfsigned):
+    r"""建 TLS 上下文。
+
+    【自签名这件事必须说清楚】`allow_selfsigned=True` 会把证书校验整个关掉
+    （`CERT_NONE` + `check_hostname=False`）。这是**医院内网自建 FTP 的常见现状**，
+    但它在密码学上等于"不验身份、只求加密信道" —— 能防 Passive Sniffing，
+    防不住中间人。所以界面上它是**默认不勾**的勾选项，而不是默认行为。
+    """
+    ctx = ssl.create_default_context()
+    if allow_selfsigned:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+class ImplicitFTP_TLS(ftplib.FTP_TLS):
+    r"""隐式 TLS（FTPS，通常 990）：**连上立刻握手**，不发 AUTH TLS。
+
+    与 `FTP_TLS` 的区别只有一步：`connect()` 之后马上把控制连接包起来。
+    之后的 `login()` / `prot_p()` 与显式模式完全相同 —— 所以握手函数可以共用。
+    """
+
+    def connect(self, host="", port=0, timeout=-999, source_address=None):
+        super().connect(host, port, timeout, source_address)
+        self.sock = self.context.wrap_socket(self.sock, server_hostname=host)
+        self.af = self.sock.family
+        return self.welcome
+
+
+def ftp_class_for(mode):
+    """→ 该用哪个类建连接对象。`none` 返回 `None`（调用方按原样用 `ftplib.FTP`）。"""
+    if mode == "explicit":
+        return ftplib.FTP_TLS
+    if mode == "implicit":
+        return ImplicitFTP_TLS
+    return None
+
+
+def secure_session(ftp, mode, host, user, password):
+    r"""在**已 connect** 的对象上完成握手 → 登录 → 数据通道加密。
+
+    【为什么抽成独立函数】这三步的顺序是安全语义的核心（先握手再送密码），
+    而它没法用"真连一台 FTPS"来验（测试环境没有那台服务器）。
+    抽出来之后就能用一个记录调用的假对象把**顺序**钉死 —— 顺序错了就是明文送密码，
+    那种错误不会有任何报错，只会在抓包里看得见。
+
+    【显式模式的顺序】connect → auth() → login() → prot_p()
+      先 auth 再 login，密码才是走加密信道的；`prot_p()` 让**数据通道**也加密
+      （没有这一步，文件内容是明文传的，控制通道加密等于白做）。
+    """
+    if not isinstance(ftp.sock, ssl.SSLSocket):
+        if mode == "implicit":
+            # 隐式模式理论上已在 connect 里包过；走到这里说明调用方拿错了类
+            raise ValueError("隐式 TLS 应在 connect() 时完成握手")
+        ftp.auth()                      # AUTH TLS
+    ftp.login(user, password)
+    ftp.prot_p()                        # PBSZ 0 + PROT P
+    return ftp
+
+
 class _WatchdogFTP(ftplib.FTP):
     def __init__(self, *args, **kwargs):
         self.data_idle_timeout = kwargs.pop('data_idle_timeout', None)
@@ -49,7 +111,7 @@ class _WatchdogFTP(ftplib.FTP):
 
 class FTPHelper:
     def __init__(self, host, user='', password='', port=21, timeout=10,
-                 data_idle_timeout=None):
+                 data_idle_timeout=None, tls_mode="none", allow_selfsigned=False):
         self.host = host
         self.user = user
         self.password = password
@@ -59,6 +121,10 @@ class FTPHelper:
         # 传秒数 = 用 _WatchdogFTP（连接池路径）。默认 None 是刻意的：
         # 回滚开关 _FTP_POOL_ENABLED=False 时，被跑起来的必须是**当年验过的那套**。
         self.data_idle_timeout = data_idle_timeout
+        # 【2026-11-05 FTPS】默认 "none" = 明文，与升级前逐字节一致；
+        #   调用方（ftp_transfer / 维护任务）从配置里把这两项传进来。
+        self.tls_mode = tls_mode or "none"
+        self.allow_selfsigned = bool(allow_selfsigned)
         self.ftp = None
         self.log_callback = None
         # 【阶段2d-新增】RNFR/RNTO 能力缓存：None=未探测，True/False=已探测结果。
@@ -73,12 +139,21 @@ class FTPHelper:
             self.log_callback(msg)
 
     def connect(self):
-        if self.data_idle_timeout:
-            self.ftp = _WatchdogFTP(data_idle_timeout=self.data_idle_timeout)
+        # 【2026-11-05 FTPS】按配置的加密模式选连接类。
+        #   `tls_mode` 缺省（老配置 / 未接线）一律当 `none` —— 与升级前逐字节一致。
+        mode = getattr(self, "tls_mode", None) or "none"
+        cls = ftp_class_for(mode)
+        if cls is not None:
+            self.ftp = cls(context=build_tls_context(getattr(self, "allow_selfsigned", False)))
+            self.ftp.connect(self.host, self.port, self.timeout)
+            secure_session(self.ftp, mode, self.host, self.user, self.password)
         else:
-            self.ftp = ftplib.FTP()
-        self.ftp.connect(self.host, self.port, self.timeout)
-        self.ftp.login(self.user, self.password)
+            if self.data_idle_timeout:
+                self.ftp = _WatchdogFTP(data_idle_timeout=self.data_idle_timeout)
+            else:
+                self.ftp = ftplib.FTP()
+            self.ftp.connect(self.host, self.port, self.timeout)
+            self.ftp.login(self.user, self.password)
         # 启用 UTF-8 支持以处理中文文件名
         try:
             self.ftp.voidcmd('OPTS UTF8 ON')

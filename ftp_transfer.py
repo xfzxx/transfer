@@ -757,7 +757,9 @@ class FtpTransfer(object):
             # 单连接实现本来就没有重连逻辑（`_reconnect_attempts` 只活在 FTPPooledConn 里），
             # 所以这里**不需要**它：删掉即回到基线行为，一个参数都没少。
             ftp = ftp_client.FTPHelper(ftp_cfg['host'], ftp_cfg['user'], ftp_cfg['password'],
-                                       ftp_cfg['port'], timeout=self._core._task_ftp_timeout)
+                                       ftp_cfg['port'], timeout=self._core._task_ftp_timeout,
+                                       tls_mode=ftp_cfg.get('tls_mode', 'none'),
+                                       allow_selfsigned=ftp_cfg.get('allow_selfsigned', False))
             ftp.set_log_callback(self._ui._threadsafe_log)
             ftp.connect()
 
@@ -954,7 +956,9 @@ class FtpTransfer(object):
             #   （有它的是 `FTPPooledConn` / `FTPConnectionPool`），回滚路径直接 TypeError。
             #   删除理由与下载侧逐字相同：单连接实现没有重连逻辑，这个参数本来就用不上。
             ftp = ftp_client.FTPHelper(ftp_cfg['host'], ftp_cfg['user'], ftp_cfg['password'],
-                                       ftp_cfg['port'], timeout=self._core._task_ftp_timeout)
+                                       ftp_cfg['port'], timeout=self._core._task_ftp_timeout,
+                                       tls_mode=ftp_cfg.get('tls_mode', 'none'),
+                                       allow_selfsigned=ftp_cfg.get('allow_selfsigned', False))
             ftp.set_log_callback(self._ui._threadsafe_log)
             ftp.connect()
 
