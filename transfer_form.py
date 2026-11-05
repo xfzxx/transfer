@@ -1041,10 +1041,17 @@ class TransferForm(object):
         remote_dir = (fields.get("remote_dir") or "").strip()
         if not remote_dir.startswith("/"):
             remote_dir = "/" + remote_dir
+        # 【2026-11-05 FTPS】加密模式与自签名。前端没送（老页面缓存）时按明文处理，
+        #   与 `_clean_profile` 的回落一致 —— 两处口径不一样就会出现"界面选无、存成 explicit"。
+        _tls = (fields.get("tls_mode") or "none")
+        if _tls not in config.TLS_MODES:
+            _tls = "none"
         cfg = {"host": host, "port": port,
                "user": (fields.get("user") or "").strip(),
                "password": (fields.get("password") or "").strip(),
-               "remote_dir": remote_dir}
+               "remote_dir": remote_dir,
+               "tls_mode": _tls,
+               "allow_selfsigned": bool(fields.get("allow_selfsigned"))}
         idx = None
         for i, p in enumerate(self.ftp_profiles):
             if p["name"] == name:

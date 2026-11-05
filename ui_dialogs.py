@@ -109,6 +109,26 @@ class FTPSettingsDialog(tk.Toplevel):
         self.dir_entry.insert(0, last.get("remote_dir", "/") if last else "/")
         self.dir_entry.pack(pady=2, fill="x", padx=10)
 
+        # ---- 【2026-11-05 FTPS】加密模式 + 自签名 ----
+        # 【为什么用 `OptionMenu` 而不是 Combobox】`ttkbootstrap.Combobox` 在替身层
+        #   没有对应实现，C3/C4 装配时会炸；而 `OptionMenu` 是本项目已经在用的控件
+        #   （源/目标类型那两个下拉就是它），替身层有，两档都安全。
+        # 【为什么显示中文标签而不是 none/explicit】这是给医院信息科看的界面，
+        #   存的是键（落盘/比较用），显示的是标签（`app_config.TLS_MODE_LABELS`）——
+        #   两套字符串只在这一个下拉里做一次映射。
+        tk.Label(self, text="加密模式:").pack()
+        _tls_now = (last.get("tls_mode") or "none") if last else "none"
+        self.tls_var = tk.StringVar(value=app_config.TLS_MODE_LABELS.get(_tls_now, "无（明文）"))
+        _tls_menu = tk.OptionMenu(self, self.tls_var,
+                                  *[app_config.TLS_MODE_LABELS[m] for m in app_config.TLS_MODES])
+        _tls_menu.pack(pady=2, fill="x", padx=10)
+
+        tk.Label(self, text="").pack()          # 一点呼吸空间（这个框本来就偏挤）
+        self.selfsigned_var = tk.BooleanVar(
+            value=bool(last.get("allow_selfsigned", False)) if last else False)
+        tk.Checkbutton(self, text="允许自签名证书（内网自建服务器常见）",
+                       variable=self.selfsigned_var).pack(anchor="w", padx=10)
+
         # 【功能C2】层次感修复 —— 只加 bootstyle，**结构/位置/顺序/文字一个字未动**。
         #   改前实测：这三个按钮的底色**全是主色 `#2780e3`**（`_probe_c2_fit.py` 量的），
         #   也就是用户说的"三蓝一片"—— 三个按钮重量级完全一样，看不出哪个是主操作。
@@ -141,21 +161,40 @@ class FTPSettingsDialog(tk.Toplevel):
         remote_dir = self.dir_entry.get().strip()
         if not remote_dir.startswith('/'):
             remote_dir = '/' + remote_dir
+        # 标签 → 键。认不出来（用户手改过？）就当明文 —— 与配置清洗的回落一致。
+        _rev = {v: k for k, v in app_config.TLS_MODE_LABELS.items()}
+        tls_mode = _rev.get(self.tls_var.get(), "none")
         return {
             'host': host,
             'port': port,
             'user': user,
             'password': password,
-            'remote_dir': remote_dir
+            'remote_dir': remote_dir,
+            # 【2026-11-05 FTPS】选"无"时这两项分别是 'none' / False，
+            # 与升级前保存的配置逐字节一致 —— 老库不需要迁移。
+            'tls_mode': tls_mode,
+            'allow_selfsigned': bool(self.selfsigned_var.get()),
         }
 
     def _test_connection(self):
         config = self._get_config()
         if not config: return
         try:
-            ftp = ftplib.FTP()
-            ftp.connect(config['host'], config['port'], timeout=10)
-            ftp.login(config['user'], config['password'])
+            # 【2026-11-05】测试连接必须用**配置里那个加密模式**去连 ——
+            #   否则在只开 FTPS 的服务器上，用户填对了却永远"连接失败"。
+            _mode = config.get('tls_mode', 'none')
+            if _mode in ("explicit", "implicit"):
+                import ftp_client                       # 迟导入：避免与界面模块成环
+                cls = ftp_client.ftp_class_for(_mode)
+                ftp = cls(context=ftp_client.build_tls_context(
+                    config.get('allow_selfsigned', False)))
+                ftp.connect(config['host'], config['port'], timeout=10)
+                ftp_client.secure_session(ftp, _mode, config['host'],
+                                          config['user'], config['password'])
+            else:
+                ftp = ftplib.FTP()
+                ftp.connect(config['host'], config['port'], timeout=10)
+                ftp.login(config['user'], config['password'])
             # 启用 UTF-8
             try:
                 ftp.voidcmd('OPTS UTF8 ON')

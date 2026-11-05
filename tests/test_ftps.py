@@ -12,6 +12,7 @@
 
 自签名那条守的是策略：勾了 = 主动关掉证书校验（`CERT_NONE`），不勾 = 必须验。
 """
+import os
 import ssl
 
 import pytest
@@ -125,3 +126,43 @@ def test_helper_passes_tls_settings_through():
     assert ftp.tls_mode == "implicit" and ftp.allow_selfsigned is True
     # 缺省（老调用点）仍是明文
     assert ftp_client.FTPHelper("h").tls_mode == "none"
+
+
+# ===================== 【2026-11-05】界面绑定判据 =====================
+# 【为什么界面也要判据】两个字段是**分散在三处**的（Tk 对话框 / Web 表单 / 后端透传）。
+# 少接一处都不报错：Tk 选了"显式 TLS"、Web 存下去却是明文，或者反之 —— 而界面上
+# 一切正常。这三条把"三处都在"变成机械可验的。
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _read(rel):
+    with open(os.path.join(ROOT, rel), "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def test_web_form_has_tls_fields():
+    html = _read(os.path.join("web", "index.html"))
+    assert 'id="pf-tls"' in html, "Web 表单缺加密模式下拉"
+    assert 'id="pf-selfsigned"' in html, "Web 表单缺自签名勾选"
+    for mode in config.TLS_MODES:
+        assert 'value="%s"' % mode in html, "下拉里缺 %s 选项" % mode
+
+
+def test_web_payload_carries_tls_fields():
+    js = _read(os.path.join("web", "app.js"))
+    assert "tls_mode:" in js, "saveProfileForm 没把 tls_mode 送出去"
+    assert "allow_selfsigned:" in js, "saveProfileForm 没把 allow_selfsigned 送出去"
+    # 打开编辑框时也要回填，否则"编辑一套已加密的配置"会显示成明文
+    assert 'row.tls_mode' in js and "row.allow_selfsigned" in js
+
+
+def test_backend_profile_save_keeps_tls_fields():
+    src = _read("transfer_form.py")
+    assert '"tls_mode": _tls' in src, "_profile_save_fields 的 cfg 没带 tls_mode"
+    assert '"allow_selfsigned"' in src, "_profile_save_fields 的 cfg 没带 allow_selfsigned"
+
+
+def test_tk_dialog_has_tls_fields():
+    src = _read("ui_dialogs.py")
+    assert "self.tls_var" in src and "self.selfsigned_var" in src
+    assert "'tls_mode': tls_mode" in src, "对话框保存时没把 tls_mode 写进 result"

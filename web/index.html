@@ -314,6 +314,15 @@
     <div class="row">
       <span class="lbl">远程目录</span>
       <input class="input grow" id="pf-dir" type="text" spellcheck="false" placeholder="如 /pub/data">
+      <!-- 【2026-11-05 FTPS】加密模式（value 与 config.TLS_MODES 同名） -->
+      <select class="input" id="pf-tls">
+        <option value="none">无（明文）</option>
+        <option value="explicit">显式 TLS（AUTH TLS）</option>
+        <option value="implicit">隐式 TLS（FTPS，通常 990）</option>
+      </select>
+      <label class="row" style="gap: 6px; align-items: center; font-size: 12px;">
+        <input type="checkbox" id="pf-selfsigned"> 允许自签名证书（内网自建服务器常见）
+      </label>
     </div>
     <p class="hint" id="pf-hint"></p>
     <div class="modal-foot">

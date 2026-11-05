@@ -372,6 +372,9 @@ function openProfileForm(mode, rowIdx) {
   $("#pf-user").value = row ? (row.user || "") : "";
   $("#pf-pass").value = row ? (row.password || "") : "";
   $("#pf-dir").value = row ? (row.remote_dir || "/") : "/";
+  /* 【2026-11-05 FTPS】老配置没有这两个字段 ⇒ 回落明文 / 不勾，与后端清洗口径一致 */
+  $("#pf-tls").value = row ? (row.tls_mode || "none") : "none";
+  $("#pf-selfsigned").checked = row ? !!row.allow_selfsigned : false;
   $("#pf-hint").textContent = "";
   $("#profile-form").hidden = false;
   (mode === "edit" ? $("#pf-host") : nameEl).focus();
@@ -391,6 +394,8 @@ async function saveProfileForm() {
       user: $("#pf-user").value,
       password: $("#pf-pass").value,
       remote_dir: $("#pf-dir").value,
+      tls_mode: $("#pf-tls").value,
+      allow_selfsigned: $("#pf-selfsigned").checked,
     },
   }, true);                       /* quiet：错误显示在 #pf-hint，不再弹一次 toast */
   if (j && j.ok) { closeProfileForm(); return; }
