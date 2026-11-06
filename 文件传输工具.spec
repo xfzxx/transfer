@@ -77,6 +77,57 @@ _pv_hidden = collect_submodules('webview')
 # 单文件 exe 红线：这些都进 `a.datas`，仍由 bootloader 解包到临时目录 ⇒ 不破坏单文件。
 # ============================ 功能C3/C4：Web 前端资源 ============================
 
+# ============================ 图标与版本资源（2026-11-06） ============================
+# 【为什么必须在 spec 里做】打包产物原来**既没有图标也没有版本资源**（实测
+#   `(Get-Item exe).VersionInfo` 四项全空）。后果不是好看不好看：
+#     · 桌面/开始菜单上是 PyInstaller 的默认图标，医院的人认不出是哪个软件；
+#     · IT 装完后**无法从文件属性确认版本**，只能启动看标题栏 —— 十几台机器
+#       没法盘点是哪个版本。
+# 【为什么版本号从 config.py 读，而不是在这里写一份】版本只有一处真相。
+#   写两份的必然结局是 exe 是 2.6、安装包写着 2.5，谁也说不清在跑哪个。
+import os as _os
+import re as _re
+
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
+    VarStruct, VSVersionInfo)
+
+
+def _app_version():
+    p = _os.path.join(SPECPATH, "config.py")
+    with open(p, encoding="utf-8") as f:
+        m = _re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', f.read(), _re.M)
+    return m.group(1) if m else "0.0.0"
+
+
+_VER = _app_version()
+_nums = [int(x) for x in (_VER.split(".") + ["0", "0", "0"])[:3]]
+_ver4 = (_nums[0], _nums[1], _nums[2], 0)
+
+_version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=_ver4, prodvers=_ver4,
+                      mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0,
+                      date=(0, 0)),
+    kids=[
+        StringFileInfo([
+            StringTable('080404B0', [
+                StringStruct('CompanyName', '院内文件传输'),
+                StringStruct('FileDescription', '文件传输工具'),
+                StringStruct('FileVersion', _VER),
+                StringStruct('InternalName', 'transfer'),
+                StringStruct('OriginalFilename', '文件传输工具.exe'),
+                StringStruct('ProductName', '文件传输工具'),
+                StringStruct('ProductVersion', _VER),
+            ])
+        ]),
+        VarFileInfo([VarStruct('Translation', [0x0804, 1200])]),
+    ])
+
+_ver_path = _os.path.join(SPECPATH, "build", "version_info.txt")
+_os.makedirs(_os.path.dirname(_ver_path), exist_ok=True)
+with open(_ver_path, "w", encoding="utf-8") as _f:
+    _f.write(str(_version_info))
+
 a = Analysis(
     # 入口 = Web 宿主（内部 `import file_transfer` ⇒ 业务代码全部纳入）。
     # `host_probe.detect()` 开机自检决定 C3 / C4；命令行 `--c3/--c4` 可强制。
@@ -107,6 +158,8 @@ exe = EXE(
     a.datas,
     [],
     name='文件传输工具',
+    icon=_os.path.join(SPECPATH, 'app.ico'),
+    version=_ver_path,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

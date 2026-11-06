@@ -112,7 +112,6 @@ def test_build_reads_version_from_config():
                                                   os.path.join(ROOT, "installer", "build.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    sys_config = {}
     with open(os.path.join(ROOT, "config.py"), "r", encoding="utf-8") as f:
         m = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', f.read(), re.M)
     assert m, "config.py 里没有 APP_VERSION"

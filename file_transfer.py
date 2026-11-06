@@ -1209,68 +1209,73 @@ class _HostLiveView(object):
         return self._app.source_list
 
 
-if __name__ == "__main__":
-    # 【阶段四】无头模式的入口。**必须排在下面那道耦合检查之前**：
-    #   耦合检查走的是"建一个 Tk + 弹 messagebox"那条路，而无头模式下
-    #   那条路上的 messagebox **没有人点** —— 进程会永远挂在框上，
-    #   而 schtasks 那边看到的是一个"正在运行"的任务。同样的理由，
-    #   下面那道检查本身也要在无头模式下改走"写日志 + 退出码 4"。
-    _headless_name = sched_tab._parse_run_task_arg(sys.argv[1:])
+def _coupling_error_text():
+    """状态库/原子写的耦合错误说明；配置正常返回空串。
 
-    # 【阶段2a-修改原因】强制耦合检查（方案 §6.2）。
-    # _STATE_DB_ENABLED=True 而 _ATOMIC_WRITE_ENABLED=False 意味着：
-    # 状态库记录文件已完成，但磁盘上可能是写入中断的半截文件，续传会静默跳过它们
-    # ——正是整个阶段 2 要消灭的静默数据丢失。这是开发者配置错误，
-    # 必须立即、可见地失败，而不是静默降级（静默降级会让人以为开关生效了）。
-    # 反向组合（DB 关、原子开）是安全的，允许。
+    【为什么单独抽出来】这段判据在两条路径上都要用（GUI 启动、无头运行），
+    而且两边的**处理方式不同**：GUI 弹框，无头只能写日志 + 退出码。
+    文案只留一份，免得改了一处忘了另一处。
+    """
     if config._STATE_DB_ENABLED and not config._ATOMIC_WRITE_ENABLED:
-        _msg = ("_STATE_DB_ENABLED = True 时，_ATOMIC_WRITE_ENABLED 必须为 True。\n\n"
+        return ("_STATE_DB_ENABLED = True 时，_ATOMIC_WRITE_ENABLED 必须为 True。\n\n"
                 "该组合会导致：状态库记录文件已完成，但磁盘上可能是写入中断的半截文件，\n"
                 "续传时会静默跳过这些损坏文件。\n\n"
                 "请把 _ATOMIC_WRITE_ENABLED 改回 True 后重启。")
-        if _headless_name is not None:
-            # 无头模式：这个框没有人点（见上面入口处的注释）。写进这条任务的日志文件
-            # 再退 4 —— 用户翻日志时看到的是**完整那句话**，不是一句转述。
-            sys.stderr.write("[无头] 配置错误：%s\n" % _msg)
-            try:
-                os.makedirs(config.SCHEDULE_LOG_DIR, exist_ok=True)
-                with open(config.schedule_log_path(_headless_name or "unknown"),
-                          'a', encoding='utf-8') as _f:
-                    _f.write("=" * 78 + "\n[无头] **配置错误，任务没有跑**\n%s\n%s\n"
-                             % (_msg, "=" * 78))
-            except Exception:
-                pass
-            sys.exit(config.SCHEDULE_EXIT_CANNOT_START)
+    return ""
+
+
+def run_headless(task_name):
+    r"""无头跑一条定时任务，**返回进程退出码**（调用方 `sys.exit` 它）。
+
+    【为什么抽成函数（2026-11-06）】打包入口是 `web_app.py`，而 schtasks 写进 `/TR`
+    的命令行是 `<exe> --run-task <任务名>`（见 `config.schtasks_run_command`）。
+    这个函数就是"那条命令行真正跑得起来"的落点：`__main__` 与 `web_app.main` 共用它。
+    在此之前打包版不认 `--run-task` —— 到点只会弹出一个界面，任务等于没跑，
+    而界面上那条任务显示得一切正常（这是本项目最怕的那种"看起来成功了"）。
+
+    【三件事的顺序不能改】
+      ① 耦合检查先做：无头模式下没人点弹框，只能写日志 + 给退出码；
+      ② 装对话框闸（`_install_headless_dialogs`）必须在 `FileTransferApp` 之前，
+         构造函数里就有弹框点；
+      ③ 宿主命名空间的 `messagebox` 也要一起换 —— 本模块还有 3 处用法
+         （`_on_close` / `on_path_problem` / 上面那道检查），漏了就会在无头时
+         弹真模态框 ⇒ 没人点 ⇒ 进程占着任务锁不放（本项目最坏的失败形态）。
+    """
+    msg = _coupling_error_text()
+    if msg:
+        sys.stderr.write("[无头] 配置错误：%s\n" % msg)
+        try:
+            os.makedirs(config.SCHEDULE_LOG_DIR, exist_ok=True)
+            with open(config.schedule_log_path(task_name or "unknown"),
+                      'a', encoding='utf-8') as f:
+                f.write("=" * 78 + "\n[无头] **配置错误，任务没有跑**\n%s\n%s\n"
+                        % (msg, "=" * 78))
+        except Exception:
+            pass
+        return config.SCHEDULE_EXIT_CANNOT_START
+
+    # 【必须用 globals()】普通赋值只改**函数局部**名字，模块里那 3 处 `messagebox`
+    #   仍然指向真 tkinter 的实现 —— 等于闸只关了一半。
+    globals()["_HEADLESS_TASK"] = task_name
+    app_bootstrapper._install_headless_dialogs()
+    globals()["messagebox"] = app_bootstrapper.messagebox
+    return app_bootstrapper._run_headless(task_name, sys.modules[__name__])
+
+
+if __name__ == "__main__":
+    # 【顺序】无头必须排在 GUI 的一切之前：耦合检查的 GUI 分支会建 Tk 并弹框，
+    #   而计划任务里没有人点那个框。
+    _headless_name = sched_tab._parse_run_task_arg(sys.argv[1:])
+    if _headless_name is not None:
+        sys.exit(run_headless(_headless_name))
+
+    _coupling_msg = _coupling_error_text()
+    if _coupling_msg:
         _r = tk.Tk()
         _r.withdraw()
-        messagebox.showerror("配置错误", _msg)
+        messagebox.showerror("配置错误", _coupling_msg)
         _r.destroy()
         sys.exit(1)
-
-    # 【阶段四】无头：藏起窗口跑完 `--run-task` 指定的那条任务，用它的返回值当退出码。
-    #   **这一行之后不再有 GUI 路径** —— `sys.exit` 的码就是 schtasks 看到的全部信号，
-    #   所以 `_run_headless` 每一条出口都必须给一个码（见 `config.SCHEDULE_EXIT_*`）。
-    if _headless_name is not None:
-        # `__main__` 这一段本身就是模块作用域，直接赋值即可（不需要 `global`）。
-        # **必须在 `FileTransferApp(root)` 之前**：构造函数里那几个弹框点要读它。
-        _HEADLESS_TASK = _headless_name
-        # 【总闸：从此本模块再没有"会卡住的模态框"】
-        #   必须在 `FileTransferApp(root)` **之前** —— 构造函数里就有框（状态库那条路）。
-        #   见 `_install_headless_dialogs` 的 docstring：这里换的是**名字**，
-        #   44 个调用点一个都不动，以后新加的也自动被挡。
-        #   ⚠️ 它挡的是**三扇门**（messagebox / simpledialog / filedialog），
-        #   不只是 messagebox 一扇 —— 名字原来叫 `_install_headless_messagebox`，
-        #   改名就是因为那个名字会让人以为另外两扇已经有人管了。
-        app_bootstrapper._install_headless_dialogs()
-        # 【第 6 步·雷⑨ 第 6 次复发】装闸函数搬进 `app_bootstrapper` 之后，
-        #   它改绑的是**它自己那个模块**的 `messagebox`（`app_bootstrapper.messagebox`）。
-        #   而宿主这边**还有 3 处** `messagebox` 用法（`_on_close` / `_HostHooks.on_path_problem`
-        #   / 上面那道配置错误检查）⇒ 宿主命名空间**必须一起关**，否则无头模式下
-        #   那三处会弹**真**模态框 ⇒ 没人点 ⇒ 进程占着任务锁不放
-        #   ⇒「从某天起再也不传文件了」（本项目最坏的一种失败形态）。
-        #   6b7 会从树里枚举"引用过 messagebox 的生产模块"，本模块自动进名单。
-        messagebox = app_bootstrapper.messagebox
-        sys.exit(app_bootstrapper._run_headless(_headless_name, sys.modules[__name__]))
 
     root = tk.Tk()
     app = FileTransferApp(root)

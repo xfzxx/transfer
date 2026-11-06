@@ -324,6 +324,11 @@ class TransferForm(object):
         _c = _st.colors
         self.source_listbox = tk.Listbox(
             src_frame, height=3, width=38, exportselection=False,
+            # 【2026-11-06 多选】extended = 单击单选、Ctrl 点加/减、Shift 点选一片。
+            #   只放开"选择"这一层，`source_path` 的语义一个字没改：它仍然等于
+            #   **选中项里的第一个**（见 `_on_source_select`）。这样"选中项 = 当前源"
+            #   这条单一真相不用动，多选只在"删除/移动多个"时才有意义。
+            selectmode="extended",
             bg=_st.lookup("TEntry", "background") or _c.bg,
             fg=_st.lookup("TEntry", "foreground") or _c.fg,
             selectbackground=_c.primary, selectforeground="#ffffff",
@@ -1207,44 +1212,74 @@ class TransferForm(object):
             idx = len(self.source_list) - 1
         self._refresh_source_listbox(select=idx)
         return idx
+    def _selected_indices(self):
+        """→ 升序下标列表（多选的**唯一读取口**）。
+
+        【为什么要这个函数】`curselection()` 的返回值散落在「删、移、取当前源」三处。
+        每处都写 `sel[0]` 就会在某个地方悄悄退回单选（而多选的失效没有任何报错）。
+        统一从这里取，将来再加"批量设当前"之类也不用改三处。
+        """
+        try:
+            return sorted(int(i) for i in self.source_listbox.curselection())
+        except Exception:                              # noqa: BLE001
+            return []
+
     def _remove_selected_source(self):
-        """「－」按钮：删掉列表里选中的那一项。"""
-        sel = self.source_listbox.curselection()
-        if not sel:
+        """「－」按钮：删掉列表里**选中的所有项**（多选时一次删多个）。"""
+        idxs = self._selected_indices()
+        if not idxs:
             # 没选中任何一项就按"没有可删的"处理，**不弹窗**：
             # 这个按钮的语义足够直白，误点一下不该被打断。
             return
-        i = sel[0]
-        if 0 <= i < len(self.source_list):
-            del self.source_list[i]
+        for i in reversed(idxs):                       # 倒序删，下标才不会错位
+            if 0 <= i < len(self.source_list):
+                del self.source_list[i]
         if not self.source_list:
             # 列表删空了，`source_path` 必须一起清 —— 否则界面上一项都看不到，
             # 点「开始」却仍会拿这个残留值当"单源兜底"传出去。
             self.source_path.set("")
             self._refresh_source_listbox()
             return
-        # 删完把选中落到**原来那一项的位置**上（越界则落到最后一项），
+        # 删完把选中落到**被删的第一项原来的位置**上（越界则落到最后一项），
         # 免得每删一个光标就跳回顶部 —— 连着删几个的时候很烦。
-        self._refresh_source_listbox(select=min(i, len(self.source_list) - 1))
+        self._refresh_source_listbox(select=min(idxs[0], len(self.source_list) - 1))
     def _move_selected_source(self, delta):
-        """把选中的源上移 / 下移一格（`delta` = -1 / +1）。→ 新下标（动不了返回 None）。
+        """把选中的源上移 / 下移一格（`delta` = -1 / +1）。→ 新起点下标（动不了返回 None）。
 
         【为什么要能排序】源是按列表顺序**串行**跑的，顺序就是执行顺序。以前只能
         删掉再重新加一遍来调整，加回去却落在末尾 —— 想换两个源的先后得全重来。
         到头 / 没选中都**静默不动**（与 `_remove_selected_source` 同一口径：
         按钮语义直白，误点一下不该弹窗）。
+
+        【多选时整块移动（2026-11-06）】不逐个移 —— 逐个会把块内相对顺序打乱，
+        而用户看到的是"一整块高亮"。整块跨过相邻项，块内顺序保持不变。
         """
-        sel = self.source_listbox.curselection()
-        if not sel:
+        idxs = self._selected_indices()
+        n = len(self.source_list)
+        if not idxs or not all(0 <= i < n for i in idxs):
             return None
-        i = int(sel[0])
-        j = i + int(delta)
-        if not (0 <= i < len(self.source_list)) or not (0 <= j < len(self.source_list)):
-            return None
-        lst = self.source_list
-        lst[i], lst[j] = lst[j], lst[i]
-        self._refresh_source_listbox(select=j)
-        return j
+        d = int(delta)
+
+        if len(idxs) == 1:
+            i = idxs[0]
+            j = i + d
+            if not (0 <= j < n):
+                return None
+            lst = self.source_list
+            lst[i], lst[j] = lst[j], lst[i]
+            self._refresh_source_listbox(select=j)
+            return j
+
+        lo, hi = idxs[0], idxs[-1]
+        if (d < 0 and lo == 0) or (d > 0 and hi == n - 1):
+            return None                                # 整块已经贴边，不动
+        block = [self.source_list[i] for i in idxs]
+        picked = set(idxs)
+        rest = [s for i, s in enumerate(self.source_list) if i not in picked]
+        start = lo + d
+        self.source_list[:] = rest[:start] + block + rest[start:]
+        self._refresh_source_listbox(select=start, count=len(block))
+        return start
     def _dedupe_sources(self):
         """去掉列表里的重复项（保留第一次出现的位置）。→ 删掉的条数。"""
         seen, out = set(), []
@@ -1289,19 +1324,23 @@ class TransferForm(object):
         """
         self.source_listbox.yview_scroll(-1 if event.delta > 0 else 1, "units")
         return "break"
-    def _refresh_source_listbox(self, select=None):
+    def _refresh_source_listbox(self, select=None, count=1):
         """把 `source_list` 刷进 Listbox，并把选中落到 `select`（可选）。
 
         **列表与 `source_path` 的同步点**。规则只有一条：
         选中项 = 当前源；没得选（列表空）时才把 `source_path` 空着不管
         —— 空列表**不清 `source_path`**，那正是"单源兜底"能成立的原因。
+
+        `count` 是多选块的长度（默认 1）：整块移动之后要把整块重新选中，
+        否则用户看到的是"移动了一下，选中只剩一个"。
         """
         self.source_listbox.delete(0, "end")
         for s in self.source_list:
             self.source_listbox.insert("end", s)
         if select is not None and 0 <= select < len(self.source_list):
+            last = min(select + max(1, int(count)) - 1, len(self.source_list) - 1)
             self.source_listbox.selection_clear(0, "end")
-            self.source_listbox.selection_set(select)
+            self.source_listbox.selection_set(select, last)
             self.source_listbox.activate(select)
             self.source_listbox.see(select)
             self.source_path.set(self.source_list[select])

@@ -324,19 +324,52 @@ class Widget(object):
             return len(self._items)
 
     def curselection(self):
+        """→ 升序下标元组（**可能是多个**）。
+
+        【2026-11-06 多选】以前这里存的是**一个 int**，只能单选。改成列表之后：
+          · `curselection()` 的返回形态与 Tk 一致（元组，可能为空）；
+          · `_opts["_curselection"]` 内部始终是 list，`_widget_model` 原样透给前端，
+            前端据此高亮多行。
+        """
         with self._lock:
-            i = self._opts.get("_curselection")
-            if i is None:
+            idxs = self._opts.get("_curselection")
+            if not idxs:
                 return ()
-            return (i,)
+            return tuple(sorted(int(i) for i in idxs))
 
     def selection_set(self, first, last=None):
+        """选中 `[first, last]` 区间，**不清除已有选中**（Tk 语义就是这样）。
+
+        Tk 的 `Listbox.selection_set` 是"追加"，要替换必须先 `selection_clear`。
+        这里照抄那条语义，否则 Tk 档与 Web 档在"多选"上会走出两种结果 ——
+        而差别只有在用户按住 Ctrl 点第二行时才看得见。
+        """
         with self._lock:
-            self._opts["_curselection"] = int(first) if str(first).isdigit() else 0
+            try:
+                a = int(first)
+            except (TypeError, ValueError):
+                a = 0
+            try:
+                b = int(last) if last is not None else a
+            except (TypeError, ValueError):
+                b = a
+            lo, hi = (a, b) if a <= b else (b, a)
+            cur = set(self._opts.get("_curselection") or ())
+            cur.update(range(lo, hi + 1))
+            self._opts["_curselection"] = sorted(cur)
 
     def selection_clear(self, first, last=None):
         with self._lock:
             self._opts.pop("_curselection", None)
+
+    def select_many(self, indices):
+        """**非 Tk 方法**：一次性设定多选（给后端 `select_list` 的 indices 用）。
+
+        不去模拟 Tk 的逐个 `selection_set`：前端按住 Shift 选一片时，逐个发会把
+        "中间态"也画出来（列表闪一下），一次性设定没有这个问题。
+        """
+        with self._lock:
+            self._opts["_curselection"] = sorted({int(i) for i in (indices or [])})
 
     def activate(self, index):
         return None

@@ -62,7 +62,11 @@ Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 !ifdef TESTMODE
   OutFile "out\_test-安装包.exe"
 !else
-  OutFile "out\文件传输工具-${PRODUCT_VERSION}-安装包.exe"
+  !ifdef LITE
+    OutFile "out\文件传输工具-${PRODUCT_VERSION}-轻量版.exe"
+  !else
+    OutFile "out\文件传输工具-${PRODUCT_VERSION}-安装包.exe"
+  !endif
 !endif
 ShowInstDetails show
 ShowUninstDetails show
@@ -78,6 +82,10 @@ VIAddVersionKey /LANG=2052 "CompanyName"      "${PRODUCT_PUBLISHER}"
 
 ; ---------------------------------------------------------------- 界面
 !define MUI_ABORTWARNING
+; 安装程序自己的图标（与 exe 同一份）：Windows 的"应用和功能"、任务栏、UAC 提示
+; 都会用到它。共用 ../app.ico，避免再维护第二个图标文件。
+!define MUI_ICON   "..\app.ico"
+!define MUI_UNICON "..\app.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "立即运行 ${PRODUCT_NAME}"
 
@@ -178,13 +186,26 @@ Section "主程序" SecMain
   File "部署说明.txt"
 
   ; 把 WebView2 离线安装器随包带上：找不到系统运行时时用它就地静默装。
-  SetOutPath "$INSTDIR\vendor"
-  File "vendor\${WEBVIEW2_SETUP}"
-  SetOutPath "$INSTDIR"
+  ; 【轻量版没有它】LITE 版省掉这 205MB，代价是缺运行时的机器只能走浏览器模式。
+  !ifndef LITE
+    SetOutPath "$INSTDIR\vendor"
+    File "vendor\${WEBVIEW2_SETUP}"
+    SetOutPath "$INSTDIR"
+  !endif
 
   ; ---------------- WebView2 ----------------
   DetailPrint "检查 WebView2 运行时…"
   Call CheckWebView2
+  !ifdef LITE
+    ; 轻量版不带安装器：缺运行时只能提示，不能装（这正是省掉 205MB 的代价）。
+    ${If} $0 == "0"
+      DetailPrint "[提示] 轻量版不含 WebView2 安装器，本机缺少运行时 → 将走浏览器模式"
+      ${IfNot} ${Silent}
+        MessageBox MB_ICONINFORMATION|MB_OK \
+          "本机没有 WebView2 运行时，而这个**轻量版**不包含它。$\r$\n$\r$\n程序会自动以「浏览器模式」启动（界面开在系统浏览器里），功能完全一样。$\r$\n想要内嵌窗口，请改用完整版安装包，或让信息科单独安装 WebView2 运行时。"
+      ${EndIf}
+    ${EndIf}
+  !else
   ${If} $0 == "0"
     DetailPrint "未检测到 WebView2，正在静默安装（离线包，约需 1-2 分钟）…"
     ExecWait '"$INSTDIR\vendor\${WEBVIEW2_SETUP}" /silent /install' $1
@@ -204,6 +225,19 @@ Section "主程序" SecMain
   ${Else}
     DetailPrint "WebView2 已存在，跳过安装"
   ${EndIf}
+  !endif
+
+  ; ---------------- 共享数据目录（P2） ----------------
+  ; 【为什么要给 Users 写权限】`Program Files` 默认只读，程序 `_writable()` 探不过，
+  ;   就会退回 `%LOCALAPPDATA%\文件传输工具\data` —— 也就是**每个登录账号一份配置**。
+  ;   医院里一台机器多人轮用，"信息科配好的 FTP、定时任务，换个账号就全没了"，
+  ;   会被反复当成故障来报。
+  ;   这里预建 data\ 并授予 Users 修改权，配置就跟着**机器**走。
+  ;   ⚠️ 代价写在部署说明里：FTP 口令对该机所有用户可见。加密传输（FTPS）与
+  ;     专用账号是配套建议，不是可选项。
+  CreateDirectory "$INSTDIR\data"
+  nsExec::ExecToLog 'icacls "$INSTDIR\data" /grant *S-1-5-32-545:(OI)(CI)M /C'
+  Pop $0                          ; icacls 的退出码只记日志，不让它影响安装成败
 
   ; 运行时已可用 → 删掉安装目录里那份 215MB 离线包，别每台机器白占 205MB。
   ; （将来要修复/重装 WebView2，重跑本安装包即可，包里一直带着它。）
@@ -231,6 +265,10 @@ Section "主程序" SecMain
   WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
+  ; 应用列表里显示安装大小（KB）。不算它的话「设置 → 应用」里显示"大小未知"，
+  ; IT 盘点磁盘占用时没法从系统侧看。
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" "$0"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd

@@ -888,14 +888,27 @@ class WebBridge(object):
             kind, obj = self._resolve(target)
             if kind != "widget" or obj._kind != "listbox":
                 raise ValueError("%r 不是列表，不能 select" % (target,))
-            idx = int(payload["index"])
-            obj.selection_clear(0, "end")
-            obj.selection_set(idx)
-            obj.see(idx)
+            # 【2026-11-06】一次可以选中多个（Ctrl/Shift 点选）。两种写法都收：
+            #   {"index": 3}              单选（老前端 / 老动作）
+            #   {"indices": [1,2,3]}      多选
+            # 多选只对源列表有意义（要删多个）；FTP 配置与计划任务仍是单选语义。
+            if "indices" in payload:
+                idxs = [int(i) for i in (payload.get("indices") or [])]
+                obj.selection_clear(0, "end")
+                obj.select_many(idxs)
+                if idxs:
+                    obj.see(idxs[0])
+                result = idxs
+            else:
+                idx = int(payload["index"])
+                obj.selection_clear(0, "end")
+                obj.selection_set(idx)
+                obj.see(idx)
+                result = idx
             fn = obj._bindings.get("<<ListboxSelect>>")
             if fn is not None:
                 fn(web_kit._Event(widget=obj))
-            return idx
+            return result
         if action == "semantic":
             # ⚠️ 语义动作名必须从**信封**（req）里读，不能从 payload 里读：
             #    payload 里也可能有一个 `name` —— 那正是 FTP 配置的名字
@@ -1661,6 +1674,9 @@ def run_tk():
     return 0
 
 
+import sched_tab  # noqa: E402 —— 无头入口解析（--run-task）
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     mode = None                       # None ⇒ 交给 `host_probe` 开机自检
@@ -1699,6 +1715,16 @@ def main(argv=None):
             no_browser = True
             explicit = True
         i += 1
+
+    # 【2026-11-06 P0】定时任务的无头入口。
+    #   schtasks 写进 `/TR` 的命令是 `<exe> --run-task <任务名>`
+    #   （`config.schtasks_run_command`），而打包后的入口是**本文件** ——
+    #   这里不分派的话，到点只会弹出一个界面，任务等于没跑，而界面上那条任务
+    #   看起来一切正常。**必须排在任何 GUI 动作之前**（含单实例互斥、耦合检查的
+    #   弹框路径、`build()` 装替身）。
+    if sched_tab._parse_run_task_arg(argv) is not None:
+        import file_transfer
+        return file_transfer.run_headless(sched_tab._parse_run_task_arg(argv))
 
     if not explicit:
         # 正常双击启动：先看有没有已经跑着的实例（见「单实例 / 端口落点」一节）。

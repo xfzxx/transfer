@@ -6,13 +6,15 @@ r"""构建安装包：读版本号 → 规范化文本编码 → 调 makensis。
 
 用法：
     python installer/build.py            # 正式包（管理员安装，装到 Program Files）
+    python installer/build.py --lite     # 轻量版（不含 205MB WebView2 离线安装器）
     python installer/build.py --test     # 测试包（免管理员，装到 %TEMP%，只验布局）
 
 前置：
     · dist\文件传输工具.exe 已打包
-    · installer\vendor\MicrosoftEdgeWebView2RuntimeInstallerX64.exe 已就位
+    · installer\vendor\MicrosoftEdgeWebView2RuntimeInstallerX64.exe 已就位（--lite 不需要）
     · makensis 可用（默认取 %NSIS_MAKENSIS%，否则在 PATH 里找）
 """
+import hashlib
 import os
 import re
 import shutil
@@ -58,20 +60,33 @@ def find_makensis():
     raise SystemExit("找不到 makensis：请设 NSIS_MAKENSIS 或把它加进 PATH")
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def main():
     test = "--test" in sys.argv
+    lite = "--lite" in sys.argv
+
     ver = app_version()
 
     exe = os.path.join(ROOT, "dist", "文件传输工具.exe")
     if not os.path.exists(exe):
         raise SystemExit("缺 dist\\文件传输工具.exe —— 先跑 PyInstaller")
-    if not os.path.exists(WEBVIEW2):
-        raise SystemExit("缺 WebView2 离线安装器：installer\\vendor\\"
-                         "MicrosoftEdgeWebView2RuntimeInstallerX64.exe")
-    size = os.path.getsize(WEBVIEW2)
-    if size != WEBVIEW2_EXPECTED:
-        print("[注意] WebView2 安装器大小 %d，与官方 x64 离线包（%d）不一致 ——"
-              "若你换来的是别的架构/版本，忽略此提示" % (size, WEBVIEW2_EXPECTED))
+
+    if not lite:
+        if not os.path.exists(WEBVIEW2):
+            raise SystemExit("缺 WebView2 离线安装器：installer\\vendor\\"
+                             "MicrosoftEdgeWebView2RuntimeInstallerX64.exe\n"
+                             "（只想要小包可以加 --lite）")
+        size = os.path.getsize(WEBVIEW2)
+        if size != WEBVIEW2_EXPECTED:
+            print("[注意] WebView2 安装器大小 %d，与官方 x64 离线包（%d）不一致 ——"
+                  "若你换来的是别的架构/版本，忽略此提示" % (size, WEBVIEW2_EXPECTED))
 
     # 【脚本本身也要 BOM】makensis 默认按 ACP(936) 读 .nsi；`Unicode True` 只是让
     # **产物**是 Unicode，不会把脚本的读取编码改掉。没有 BOM 的 UTF-8 中文注释会被
@@ -83,20 +98,47 @@ def main():
     cmd = [find_makensis(), "/DPRODUCT_VERSION=%s" % ver]
     if test:
         cmd.append("/DTESTMODE")
+    if lite:
+        cmd.append("/DLITE")
     cmd.append(os.path.join(HERE, "installer.nsi"))
 
-    print("[构建] 版本 %s%s" % (ver, "（测试模式：免管理员）" if test else ""))
-    print("[构建] exe %.1f MB + WebView2 %.1f MB —— LZMA 压缩较慢，请耐心"
-          % (os.path.getsize(exe) / 1048576.0, size / 1048576.0))
+    kind = "测试模式（免管理员）" if test else ("轻量版（不含 WebView2）" if lite else "完整版")
+    print("[构建] 版本 %s · %s" % (ver, kind))
+    payload = os.path.getsize(exe) / 1048576.0
+    if not lite:
+        payload += os.path.getsize(WEBVIEW2) / 1048576.0
+    print("[构建] 载荷约 %.1f MB —— LZMA 压缩较慢，请耐心" % payload)
     rc = subprocess.call(cmd, cwd=HERE)
     if rc != 0:
         raise SystemExit("makensis 失败，退出码 %d" % rc)
 
-    out = os.path.join(HERE, "out",
-                       "_test-安装包.exe" if test else
-                       "文件传输工具-%s-安装包.exe" % ver)
+    if test:
+        out_name = "_test-安装包.exe"
+    elif lite:
+        out_name = "文件传输工具-%s-轻量版.exe" % ver
+    else:
+        out_name = "文件传输工具-%s-安装包.exe" % ver
+    out = os.path.join(HERE, "out", out_name)
     if os.path.exists(out):
+        digest = _sha256(out)
         print("[完成] %s  %.1f MB" % (out, os.path.getsize(out) / 1048576.0))
+        # 【为什么要给校验值】exe 没有代码签名（没有证书），IT 侧唯一的完整性依据
+        # 就是 SHA256：下发前对一次，能确认"传过去的和这里打的"是同一个文件。
+        print("[SHA256] %s  %s" % (digest, out_name))
+        if not test:
+            # 【追加而不是覆盖】完整版与轻量版是两个文件，各有一行校验值。
+            # 覆盖写会让"最后构建的那个"把另一个的记录挤掉 —— 下发前核对时
+            # 找不到对应行，比没有这文件更让人怀疑。
+            sums = os.path.join(HERE, "out", "SHA256SUMS.txt")
+            lines = []
+            if os.path.exists(sums):
+                with open(sums, "r", encoding="utf-8") as f:
+                    lines = [ln.rstrip("\r\n") for ln in f if ln.strip()]
+            lines = [ln for ln in lines if not ln.endswith("  " + out_name)]
+            lines.append("%s  %s" % (digest, out_name))
+            with open(sums, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write("\r\n".join(lines) + "\r\n")
+            print("[完成] 校验值已更新 %s（%d 条）" % (sums, len(lines)))
     return 0
 
 

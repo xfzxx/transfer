@@ -254,13 +254,32 @@ function renderSources() {
    * 里 ⇒ **整个界面停更**（进度、日志、列表全不动，连接徽章变成"未连接"）。
    * 症状像"服务挂了"，根因在这一行。三个列表渲染器统一走 `selIdx()`。 */
   const sel = selIdx(m);
+  const selSet = new Set(selIndices(m));
   ul.innerHTML = "";
   items.forEach((it, i) => {
     const li = document.createElement("li");
     li.textContent = it;
-    if (i === sel) li.classList.add("is-sel");
+    if (selSet.has(i)) li.classList.add("is-sel");
     li.title = it;
-    li.onclick = () => invoke({ action: "select_list", target: "source_listbox", index: i });
+    /* 【2026-11-06 多选】与 Tk 档同构：单击选中一行；Ctrl 点加/减一行；Shift 点选一片。
+     * 只对**源列表**这么做 —— FTP 配置与计划任务仍是"选中项 = 当前操作对象"的单选语义，
+     * 那两个列表多选没有意义（编辑/删除/设为当前都只作用于一个）。
+     * 注意传的是 `indices`（数组）而不是 `index`：后端两个都收，见 web_app.select_list。 */
+    li.onclick = (ev) => {
+      const cur = selIndices(m);
+      let next;
+      if (ev.shiftKey && cur.length) {
+        const lo = Math.min(Math.min(...cur), i);
+        const hi = Math.max(Math.max(...cur), i);
+        next = [];
+        for (let k = lo; k <= hi; k += 1) next.push(k);
+      } else if (ev.ctrlKey || ev.metaKey) {
+        next = cur.includes(i) ? cur.filter((k) => k !== i) : cur.concat([i]).sort((a, b) => a - b);
+      } else {
+        next = [i];
+      }
+      invoke({ action: "select_list", target: "source_listbox", indices: next });
+    };
     ul.appendChild(li);
   });
 }
@@ -326,6 +345,16 @@ function profileSelection(box) {
   if (raw === null || raw === undefined || raw === "") return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+/* 多选的下标数组。**兼容两种形态**：模型现在给的是数组（替身 `_curselection` 是 list），
+ * 但刷新过程中可能拿到一帧旧的标量快照 —— 两种都收，免得一个过渡帧把界面打崩。 */
+function selIndices(box) {
+  const raw = box && box.selection;
+  if (raw === null || raw === undefined || raw === "") return [];
+  if (Array.isArray(raw)) return raw.map(Number).filter(Number.isFinite);
+  const n = Number(raw);
+  return Number.isFinite(n) ? [n] : [];
 }
 
 /* 三个列表（源 / FTP 配置 / 计划任务）**统一**用它取选中项 —— 它们是同一种东西，
