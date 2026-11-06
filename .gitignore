@@ -31,3 +31,6 @@ __pycache__/
 # 用 `installer/fetch-webview2.py` 现取；把它塞进仓库会让 clone 变成一次 200MB 下载。
 /installer/vendor/
 /installer/out/
+
+# ============ 交付包（二进制成品，按版本另存）============
+/delivery/
